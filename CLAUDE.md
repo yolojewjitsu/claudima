@@ -1,0 +1,131 @@
+# Claudir
+
+Telegram bot powered by Claude AI.
+
+## CRITICAL SECURITY: Claude Code Integration
+
+**Claude Code MUST NOT be able to execute arbitrary code.** This bot uses Claude Code CLI
+as a subprocess for LLM inference. If Claude Code has access to Bash, Edit, Write, or
+similar tools, any malicious prompt from Telegram users becomes **Remote Code Execution**.
+
+**Mandatory safeguards when spawning Claude Code:**
+- ALWAYS use `--tools ""` to disable ALL built-in tools
+- NEVER allow Bash, Edit, Write, Read, or any file/code execution tools
+- Claude should ONLY output text that we parse for JSON actions
+- We execute actions ourselves (send_message, etc.) - Claude Code must not
+
+**Testing:**
+- ALWAYS use `data/test/` config for development, NEVER `data/prod/`
+- Test config: `data/test/claudir.json`
+- Prod config: `data/prod/claudir.json`
+
+## Code Quality Standards
+
+**Write code like a self-respecting Rust core maintainer:**
+
+- NO `#[allow(dead_code)]` or similar to sweep problems under the carpet
+- NO cutting corners - if code is unused, either use it or delete it
+- NO placeholder implementations - every function must be complete
+- All warnings are errors - `cargo clippy -- -D warnings` must pass
+- Tests must be meaningful, not just "it compiles"
+- Prefer explicit over implicit - no hidden behavior
+- Every public API must have a clear purpose and be actually used
+
+**Logging:**
+
+- Import tracing macros directly: `use tracing::{info, warn, error, debug};`
+- Never use `tracing::info!()` - use `info!()` directly after importing
+- Always log errors with `error!()`, `warn!()`, or `info!()` as appropriate
+
+**Error Handling:**
+
+- **NEVER** swallow errors silently - this makes debugging extremely hard
+- Use `?` for propagation when the caller should handle the error
+- If you must ignore a result, at least log it: `if let Err(e) = foo() { warn!("foo failed: {e}"); }`
+- Avoid `let _ = fallible_operation();` without logging
+
+**Debugging When Stuck:**
+
+- Being stuck usually means lacking information to get unstuck
+- Step back and increase information: add logging, verify assumptions with logs
+- Use `debug!()` or `info!()` liberally when investigating issues
+- Print intermediate values, function entry/exit, decision points
+- The answer is often in the data you haven't looked at yet
+
+## Current: Spam Filter
+
+Monitors Telegram groups and filters spam messages using a two-tier approach:
+
+1. **Prefilter** - Fast regex-based checks for obvious spam/safe patterns
+2. **Claude Haiku** - AI classification for ambiguous messages
+
+Strike system: 3 strikes = ban.
+
+## Future: Group Chat Participant
+
+The bot will evolve into an active chat participant that engages in conversations like a regular group member. Claude Code will run it in the background and keep it alive.
+
+## Architecture
+
+```
+src/
+├── main.rs         # Bot setup, message handler, strike system
+├── classifier.rs   # Claude Haiku spam classification
+├── claude.rs       # Anthropic API client
+├── config.rs       # JSON config loading
+├── prefilter.rs    # Regex-based pre-classification
+└── telegram_log.rs # Tracing layer for Telegram logging
+```
+
+## Config
+
+`claudir.json`:
+- `telegram_bot_token` - Bot token from @BotFather
+- `anthropic_api_key` - Claude API key
+- `owner_ids` - User IDs exempt from filtering
+- `allowed_groups` - Group IDs to monitor (empty = all)
+- `max_strikes` - Strikes before ban (default 3)
+- `dry_run` - Log actions without executing
+- `log_chat_id` - Optional chat for log forwarding
+
+## Running
+
+```bash
+cargo build --release
+./target/release/claudir [config.json]
+```
+
+**ALWAYS run the bot in the background** using Bash's `run_in_background` parameter. Never use `&` manually.
+
+Runs locally on this machine (always on). Claude Code monitors and restarts if needed.
+
+## Logs
+
+All logs go to `logs/claudir.log` - a single persistent file across all runs. Check this file for:
+- Complete conversation history
+- Error messages and warnings
+- Bot activity and state
+
+## Monitoring - Intelligent Observability
+
+**You are an intelligent observability system when not writing code.**
+
+1. **Periodically check logs**: Use `tail -100 logs/claudir.log` to review recent activity
+2. **Proactively fix issues**: Don't wait to be asked - if you see errors, investigate and fix them
+3. **Never let the bot get stuck**: If you see long gaps in activity or hanging operations, investigate
+4. **Keep the bot healthy**: Restart if needed, fix bugs as you find them
+5. **Watch for patterns**: Look for recurring errors, timeouts, or unusual behavior
+
+**What to look for in logs:**
+- ERROR or WARN level messages (something went wrong)
+- Long gaps between "Debouncer fired" and "Claude returned" (API timeout?)
+- Missing "Claude returned" after "Processing with Claude" (hanging?)
+- "Failed to send message" (Telegram API issues)
+- Repeated errors for the same user/message
+
+**When you find issues:**
+1. First understand what happened by reading surrounding log context
+2. Add more logging if needed to get better visibility
+3. Fix the root cause, not just the symptom
+4. Test the fix works
+5. Rebuild and restart the bot

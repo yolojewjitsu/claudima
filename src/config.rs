@@ -1,0 +1,127 @@
+use regex::Regex;
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use teloxide::types::{ChatId, UserId};
+
+#[derive(Deserialize)]
+struct ConfigFile {
+    owner_ids: Vec<u64>,
+    telegram_bot_token: String,
+    /// API key - only required if use_claude_code is false
+    #[serde(default)]
+    anthropic_api_key: String,
+    #[serde(default)]
+    allowed_groups: Vec<i64>,
+    #[serde(default)]
+    trusted_channels: Vec<i64>,
+    #[serde(default)]
+    spam_patterns: Vec<String>,
+    #[serde(default)]
+    safe_patterns: Vec<String>,
+    #[serde(default = "default_max_strikes")]
+    max_strikes: u8,
+    #[serde(default)]
+    dry_run: bool,
+    log_chat_id: Option<i64>,
+    /// Directory for state files (logs, context). Defaults to current directory.
+    data_dir: Option<String>,
+}
+
+fn default_max_strikes() -> u8 {
+    3
+}
+
+pub struct Config {
+    pub owner_ids: HashSet<UserId>,
+    pub telegram_bot_token: String,
+    pub anthropic_api_key: String,
+    pub allowed_groups: HashSet<ChatId>,
+    pub trusted_channels: HashSet<ChatId>,
+    pub spam_patterns: Vec<Regex>,
+    pub safe_patterns: Vec<Regex>,
+    pub max_strikes: u8,
+    pub dry_run: bool,
+    pub log_chat_id: Option<ChatId>,
+    /// Directory for state files (logs, context).
+    pub data_dir: PathBuf,
+}
+
+impl Config {
+    pub fn load<P: AsRef<Path>>(path: P) -> Self {
+        let content = std::fs::read_to_string(path.as_ref()).expect("Failed to read config file");
+        let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
+
+        let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
+        let allowed_groups = file.allowed_groups.into_iter().map(ChatId).collect();
+        let trusted_channels = file.trusted_channels.into_iter().map(ChatId).collect();
+
+        let spam_patterns = if file.spam_patterns.is_empty() {
+            default_spam_patterns()
+        } else {
+            file.spam_patterns
+                .into_iter()
+                .map(|p| Regex::new(&p).expect("Invalid spam pattern regex"))
+                .collect()
+        };
+
+        let safe_patterns = if file.safe_patterns.is_empty() {
+            default_safe_patterns()
+        } else {
+            file.safe_patterns
+                .into_iter()
+                .map(|p| Regex::new(&p).expect("Invalid safe pattern regex"))
+                .collect()
+        };
+
+        let data_dir = file
+            .data_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        Self {
+            owner_ids,
+            telegram_bot_token: file.telegram_bot_token,
+            anthropic_api_key: file.anthropic_api_key,
+            allowed_groups,
+            trusted_channels,
+            spam_patterns,
+            safe_patterns,
+            max_strikes: file.max_strikes,
+            dry_run: file.dry_run,
+            log_chat_id: file.log_chat_id.map(ChatId),
+            data_dir,
+        }
+    }
+
+    pub fn is_owner(&self, user_id: UserId) -> bool {
+        self.owner_ids.contains(&user_id)
+    }
+
+    pub fn is_trusted_channel(&self, chat_id: ChatId) -> bool {
+        self.trusted_channels.contains(&chat_id)
+    }
+}
+
+fn default_spam_patterns() -> Vec<Regex> {
+    vec![
+        r"(?i)crypto.*profit",
+        r"(?i)earn.*\$\d+.*day",
+        r"(?i)click.*link.*bio",
+        r"(?i)dm.*me.*for",
+        r"(?i)investment.*opportunity",
+        r"(?i)make.*money.*fast",
+        r"(?i)forex.*trading",
+        r"(?i)t\.me/\S+",
+    ]
+    .into_iter()
+    .map(|p| Regex::new(p).unwrap())
+    .collect()
+}
+
+fn default_safe_patterns() -> Vec<Regex> {
+    vec![r"^[^a-zA-Z]*$", r"^\S{1,20}$", r"(?i)^(hi|hello|thanks)"]
+        .into_iter()
+        .map(|p| Regex::new(p).unwrap())
+        .collect()
+}

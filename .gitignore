@@ -1,0 +1,10 @@
+/target
+/logs
+claudir.json
+claudir-test.json
+
+# Data directories (runtime state - never commit)
+data/
+
+# Claude Code local settings (may contain API keys)
+.claude/settings.local.json
