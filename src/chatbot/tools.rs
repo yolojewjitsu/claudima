@@ -106,6 +106,20 @@ pub enum ToolCall {
         file_path: String,
     },
 
+    /// Send a photo to a chat.
+    SendPhoto {
+        /// Target chat ID
+        chat_id: i64,
+        /// Text prompt to generate an AI image (uses Gemini/Nano Banana)
+        prompt: String,
+        /// Optional caption for the image
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+        /// Optional message ID to reply to
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_message_id: Option<i64>,
+    },
+
     /// Signal that processing is complete.
     Done,
 }
@@ -302,6 +316,20 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "send_photo".to_string(),
+            description: "Generate an AI image and send it to a chat. Uses Gemini/Nano Banana for image generation.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": { "type": "integer", "description": "Target chat ID" },
+                    "prompt": { "type": "string", "description": "Text prompt describing the image to generate" },
+                    "caption": { "type": "string", "description": "Optional caption for the image" },
+                    "reply_to_message_id": { "type": "integer", "description": "Optional message ID to reply to" }
+                },
+                "required": ["chat_id", "prompt"]
+            }),
+        },
+        Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
             parameters: serde_json::json!({
@@ -351,7 +379,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "read_messages");
@@ -364,6 +392,7 @@ mod tests {
         assert_eq!(tools[9].name, "get_chat_admins");
         assert_eq!(tools[10].name, "get_members");
         assert_eq!(tools[11].name, "import_members");
-        assert_eq!(tools[12].name, "done");
+        assert_eq!(tools[12].name, "send_photo");
+        assert_eq!(tools[13].name, "done");
     }
 }

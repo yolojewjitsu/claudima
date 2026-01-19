@@ -56,6 +56,7 @@ impl BotState {
                 owner_user_id,
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
+                gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
             };
 
             // Start Claude Code with system prompt and session persistence

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatPermissions, MessageId, ParseMode, ReactionType, ReplyParameters};
+use teloxide::types::{ChatPermissions, InputFile, MessageId, ParseMode, ReactionType, ReplyParameters};
 use tracing::{info, warn};
 
 /// User info from Telegram.
@@ -213,5 +213,36 @@ impl TelegramClient {
             .collect();
 
         Ok(serde_json::to_string(&admin_list).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Send a photo from bytes.
+    pub async fn send_photo(
+        &self,
+        chat_id: i64,
+        photo_data: Vec<u8>,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<i64, String> {
+        info!("📷 Sending photo to chat {} ({} bytes)", chat_id, photo_data.len());
+
+        let chat_id = ChatId(chat_id);
+        let input_file = InputFile::memory(photo_data).file_name("image.png");
+
+        let mut request = self.bot.send_photo(chat_id, input_file);
+
+        if let Some(cap) = caption {
+            request = request.caption(cap);
+        }
+
+        if let Some(msg_id) = reply_to_message_id {
+            let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
+            request = request.reply_parameters(reply_params);
+        }
+
+        request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
+            let msg = format!("Failed to send photo: {e}");
+            warn!("{}", msg);
+            msg
+        })
     }
 }

@@ -5,6 +5,7 @@ pub mod context;
 pub mod database;
 pub mod debounce;
 pub mod engine;
+pub mod gemini;
 pub mod message;
 pub mod telegram;
 pub mod tools;

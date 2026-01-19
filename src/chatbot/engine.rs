@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use crate::chatbot::claude_code::{ClaudeCode, ToolCallWithId, ToolResult};
 use crate::chatbot::context::ContextBuffer;
 use crate::chatbot::debounce::Debouncer;
+use crate::chatbot::gemini::GeminiClient;
 use crate::chatbot::message::{ChatMessage, ReplyTo};
 use crate::chatbot::database::Database;
 use crate::chatbot::telegram::TelegramClient;
@@ -29,6 +30,7 @@ pub struct ChatbotConfig {
     pub owner_user_id: Option<i64>,
     pub debounce_ms: u64,
     pub data_dir: Option<PathBuf>,
+    pub gemini_api_key: Option<String>,
 }
 
 impl Default for ChatbotConfig {
@@ -40,6 +42,7 @@ impl Default for ChatbotConfig {
             owner_user_id: None,
             debounce_ms: 1000,
             data_dir: None,
+            gemini_api_key: None,
         }
     }
 }
@@ -398,6 +401,9 @@ async fn execute_tool(
         }
         ToolCall::ImportMembers { file_path } => {
             execute_import_members(database, config.data_dir.as_ref(), file_path).await
+        }
+        ToolCall::SendPhoto { chat_id, prompt, caption, reply_to_message_id } => {
+            execute_send_photo(config, telegram, *chat_id, prompt, caption.as_deref(), *reply_to_message_id).await
         }
         ToolCall::Done => Ok("ok".to_string()),
     };
@@ -768,6 +774,30 @@ async fn execute_import_members(
     Ok(serde_json::json!({
         "imported": count,
         "total_members": db.total_members_seen(),
+    }).to_string())
+}
+
+async fn execute_send_photo(
+    config: &ChatbotConfig,
+    telegram: &TelegramClient,
+    chat_id: i64,
+    prompt: &str,
+    caption: Option<&str>,
+    reply_to_message_id: Option<i64>,
+) -> Result<String, String> {
+    info!("🎨 Generating image: {}", prompt);
+
+    let api_key = config.gemini_api_key.as_ref()
+        .ok_or("Gemini API key not configured")?;
+
+    let gemini = GeminiClient::new(api_key.clone());
+    let image = gemini.generate_image(prompt).await?;
+
+    let msg_id = telegram.send_photo(chat_id, image.data, caption, reply_to_message_id).await?;
+
+    Ok(serde_json::json!({
+        "message_id": msg_id,
+        "chat_id": chat_id,
     }).to_string())
 }
 

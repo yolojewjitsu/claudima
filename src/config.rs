@@ -11,6 +11,9 @@ struct ConfigFile {
     /// API key - only required if use_claude_code is false
     #[serde(default)]
     anthropic_api_key: String,
+    /// Gemini API key for image generation
+    #[serde(default)]
+    gemini_api_key: String,
     #[serde(default)]
     allowed_groups: Vec<i64>,
     #[serde(default)]
@@ -36,6 +39,7 @@ pub struct Config {
     pub owner_ids: HashSet<UserId>,
     pub telegram_bot_token: String,
     pub anthropic_api_key: String,
+    pub gemini_api_key: String,
     pub allowed_groups: HashSet<ChatId>,
     pub trusted_channels: HashSet<ChatId>,
     pub spam_patterns: Vec<Regex>,
@@ -83,6 +87,7 @@ impl Config {
             owner_ids,
             telegram_bot_token: file.telegram_bot_token,
             anthropic_api_key: file.anthropic_api_key,
+            gemini_api_key: file.gemini_api_key,
             allowed_groups,
             trusted_channels,
             spam_patterns,

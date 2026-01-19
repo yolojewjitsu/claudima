@@ -283,6 +283,12 @@ impl RawToolCall {
             "import_members" => Some(ToolCall::ImportMembers {
                 file_path: self.file_path.clone()?,
             }),
+            "send_photo" => Some(ToolCall::SendPhoto {
+                chat_id: self.chat_id?,
+                prompt: self.text.clone()?, // Claude uses "text" for the prompt
+                caption: None, // Could add caption field later
+                reply_to_message_id: self.reply_to_message_id,
+            }),
             "done" => Some(ToolCall::Done),
             _ => {
                 warn!("Unknown tool: {}", self.tool);
