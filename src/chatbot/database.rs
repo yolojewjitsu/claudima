@@ -368,6 +368,17 @@ impl Database {
         self.mark_dirty();
     }
 
+    /// Find a user by username (case-insensitive partial match).
+    /// Returns the first match or None.
+    pub fn find_user_by_username(&self, username: &str) -> Option<&Member> {
+        let username_lower = username.to_lowercase();
+        self.members.values().find(|m| {
+            m.username.as_ref()
+                .map(|u| u.to_lowercase().contains(&username_lower))
+                .unwrap_or(false)
+        })
+    }
+
     /// Get members with optional filter.
     /// filter: "all", "active", "inactive", "never_posted", "left", "banned"
     pub fn get_members(&self, filter: Option<&str>, days_inactive: Option<i64>, limit: usize) -> Vec<&Member> {

@@ -4,7 +4,7 @@
 //! Claude Code maintains conversation history internally.
 //! Uses --resume to continue previous sessions across restarts.
 //!
-//! SECURITY: Uses `--tools ""` to disable all built-in tools.
+//! SECURITY: Uses `--tools "WebSearch"` to allow only read-only web search.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -37,11 +37,19 @@ const TOOL_CALLS_SCHEMA: &str = r#"{
           "to_date": { "type": "string" },
           "username": { "type": "string" },
           "limit": { "type": "integer" },
-          "query": { "type": "string" },
           "duration_minutes": { "type": "integer" },
           "days_inactive": { "type": "integer" },
           "filter": { "type": "string" },
-          "file_path": { "type": "string" }
+          "file_path": { "type": "string" },
+          "path": { "type": "string" },
+          "content": { "type": "string" },
+          "old_string": { "type": "string" },
+          "new_string": { "type": "string" },
+          "pattern": { "type": "string" },
+          "prompt": { "type": "string" },
+          "caption": { "type": "string" },
+          "description": { "type": "string" },
+          "severity": { "type": "string" }
         },
         "required": ["tool"]
       }
@@ -61,7 +69,8 @@ pub struct ToolCallWithId {
 #[derive(Debug)]
 pub struct ToolResult {
     pub tool_use_id: String,
-    pub content: String,
+    /// None = no results to show Claude, Some = results Claude should see
+    pub content: Option<String>,
     pub is_error: bool,
 }
 
@@ -216,8 +225,6 @@ struct RawToolCall {
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
     duration_minutes: Option<i64>,
     #[serde(default)]
     days_inactive: Option<i64>,
@@ -225,82 +232,136 @@ struct RawToolCall {
     filter: Option<String>,
     #[serde(default)]
     file_path: Option<String>,
+    // Memory tool fields
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    old_string: Option<String>,
+    #[serde(default)]
+    new_string: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    // send_photo fields
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    caption: Option<String>,
+    // report_bug fields
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
 }
 
 impl RawToolCall {
     /// Convert raw tool call to typed ToolCall.
-    /// Returns None if required fields are missing (logs warning).
-    fn to_tool_call(&self) -> Option<ToolCall> {
-        let result = match self.tool.as_str() {
-            "send_message" => Some(ToolCall::SendMessage {
-                chat_id: self.chat_id?,
-                text: self.text.clone().unwrap_or_default(),
-                reply_to_message_id: self.reply_to_message_id,
-            }),
-            "get_user_info" => Some(ToolCall::GetUserInfo {
-                user_id: self.user_id?,
-            }),
-            "read_messages" => Some(ToolCall::ReadMessages {
-                last_n: self.last_n,
-                from_date: self.from_date.clone(),
-                to_date: self.to_date.clone(),
-                username: self.username.clone(),
-                limit: self.limit,
-            }),
-            "add_reaction" => Some(ToolCall::AddReaction {
-                chat_id: self.chat_id?,
-                message_id: self.message_id?,
-                emoji: self.emoji.clone().unwrap_or_default(),
-            }),
-            "web_search" => Some(ToolCall::WebSearch {
-                query: self.query.clone()?,
-            }),
-            "delete_message" => Some(ToolCall::DeleteMessage {
-                chat_id: self.chat_id?,
-                message_id: self.message_id?,
-            }),
-            "mute_user" => Some(ToolCall::MuteUser {
-                chat_id: self.chat_id?,
-                user_id: self.user_id?,
-                duration_minutes: self.duration_minutes.unwrap_or(5),
-            }),
-            "ban_user" => Some(ToolCall::BanUser {
-                chat_id: self.chat_id?,
-                user_id: self.user_id?,
-            }),
-            "kick_user" => Some(ToolCall::KickUser {
-                chat_id: self.chat_id?,
-                user_id: self.user_id?,
-            }),
-            "get_chat_admins" => Some(ToolCall::GetChatAdmins {
-                chat_id: self.chat_id?,
-            }),
-            "get_members" => Some(ToolCall::GetMembers {
-                filter: self.filter.clone(),
-                days_inactive: self.days_inactive,
-                limit: self.limit,
-            }),
-            "import_members" => Some(ToolCall::ImportMembers {
-                file_path: self.file_path.clone()?,
-            }),
-            "send_photo" => Some(ToolCall::SendPhoto {
-                chat_id: self.chat_id?,
-                prompt: self.text.clone()?, // Claude uses "text" for the prompt
-                caption: None, // Could add caption field later
-                reply_to_message_id: self.reply_to_message_id,
-            }),
-            "done" => Some(ToolCall::Done),
-            _ => {
-                warn!("Unknown tool: {}", self.tool);
-                None
+    /// Returns ParseError variant if tool is unknown or missing required fields.
+    fn to_tool_call(&self) -> ToolCall {
+        let parse = || -> Result<ToolCall, String> {
+            match self.tool.as_str() {
+                "send_message" => Ok(ToolCall::SendMessage {
+                    chat_id: self.chat_id.ok_or("send_message requires chat_id")?,
+                    text: self.text.clone().unwrap_or_default(),
+                    reply_to_message_id: self.reply_to_message_id,
+                }),
+                "get_user_info" => {
+                    if self.user_id.is_none() && self.username.is_none() {
+                        Err("get_user_info requires user_id or username".to_string())
+                    } else {
+                        Ok(ToolCall::GetUserInfo {
+                            user_id: self.user_id,
+                            username: self.username.clone(),
+                        })
+                    }
+                }
+                "read_messages" => Ok(ToolCall::ReadMessages {
+                    last_n: self.last_n,
+                    from_date: self.from_date.clone(),
+                    to_date: self.to_date.clone(),
+                    username: self.username.clone(),
+                    limit: self.limit,
+                }),
+                "add_reaction" => Ok(ToolCall::AddReaction {
+                    chat_id: self.chat_id.ok_or("add_reaction requires chat_id")?,
+                    message_id: self.message_id.ok_or("add_reaction requires message_id")?,
+                    emoji: self.emoji.clone().unwrap_or_default(),
+                }),
+                "delete_message" => Ok(ToolCall::DeleteMessage {
+                    chat_id: self.chat_id.ok_or("delete_message requires chat_id")?,
+                    message_id: self.message_id.ok_or("delete_message requires message_id")?,
+                }),
+                "mute_user" => Ok(ToolCall::MuteUser {
+                    chat_id: self.chat_id.ok_or("mute_user requires chat_id")?,
+                    user_id: self.user_id.ok_or("mute_user requires user_id")?,
+                    duration_minutes: self.duration_minutes.unwrap_or(5),
+                }),
+                "ban_user" => Ok(ToolCall::BanUser {
+                    chat_id: self.chat_id.ok_or("ban_user requires chat_id")?,
+                    user_id: self.user_id.ok_or("ban_user requires user_id")?,
+                }),
+                "kick_user" => Ok(ToolCall::KickUser {
+                    chat_id: self.chat_id.ok_or("kick_user requires chat_id")?,
+                    user_id: self.user_id.ok_or("kick_user requires user_id")?,
+                }),
+                "get_chat_admins" => Ok(ToolCall::GetChatAdmins {
+                    chat_id: self.chat_id.ok_or("get_chat_admins requires chat_id")?,
+                }),
+                "get_members" => Ok(ToolCall::GetMembers {
+                    filter: self.filter.clone(),
+                    days_inactive: self.days_inactive,
+                    limit: self.limit,
+                }),
+                "import_members" => Ok(ToolCall::ImportMembers {
+                    file_path: self.file_path.clone().ok_or("import_members requires file_path")?,
+                }),
+                "send_photo" => Ok(ToolCall::SendPhoto {
+                    chat_id: self.chat_id.ok_or("send_photo requires chat_id")?,
+                    prompt: self.prompt.clone().ok_or("send_photo requires prompt")?,
+                    caption: self.caption.clone(),
+                    reply_to_message_id: self.reply_to_message_id,
+                }),
+                // Memory tools
+                "create_memory" => Ok(ToolCall::CreateMemory {
+                    path: self.path.clone().ok_or("create_memory requires path")?,
+                    content: self.content.clone().ok_or("create_memory requires content")?,
+                }),
+                "read_memory" => Ok(ToolCall::ReadMemory {
+                    path: self.path.clone().ok_or("read_memory requires path")?,
+                }),
+                "edit_memory" => Ok(ToolCall::EditMemory {
+                    path: self.path.clone().ok_or("edit_memory requires path")?,
+                    old_string: self.old_string.clone().ok_or("edit_memory requires old_string")?,
+                    new_string: self.new_string.clone().unwrap_or_default(),
+                }),
+                "list_memories" => Ok(ToolCall::ListMemories {
+                    path: self.path.clone(),
+                }),
+                "search_memories" => Ok(ToolCall::SearchMemories {
+                    pattern: self.pattern.clone().ok_or("search_memories requires pattern")?,
+                    path: self.path.clone(),
+                }),
+                "delete_memory" => Ok(ToolCall::DeleteMemory {
+                    path: self.path.clone().ok_or("delete_memory requires path")?,
+                }),
+                "report_bug" => Ok(ToolCall::ReportBug {
+                    description: self.description.clone().ok_or("report_bug requires description")?,
+                    severity: self.severity.clone(),
+                }),
+                "done" => Ok(ToolCall::Done),
+                "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, read_messages, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, send_photo, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, done", self.tool)),
             }
         };
 
-        if result.is_none() && self.tool != "done" {
-            warn!("Tool '{}' missing required fields: {:?}", self.tool, self);
+        match parse() {
+            Ok(tool_call) => tool_call,
+            Err(message) => {
+                warn!("Tool parse error for '{}': {}", self.tool, message);
+                ToolCall::ParseError { message }
+            }
         }
-
-        result
     }
 }
 
@@ -375,9 +436,11 @@ fn worker_loop(
     loop {
         match out_rx.blocking_recv() {
             Some(OutputMessage::System { tools, session_id: sid }) => {
-                let non_schema: Vec<_> = tools.iter().filter(|t| *t != "StructuredOutput").collect();
-                if !non_schema.is_empty() {
-                    error!("SECURITY: Unexpected tools: {:?}", non_schema);
+                // Allow only StructuredOutput and WebSearch
+                let allowed = ["StructuredOutput", "WebSearch"];
+                let unexpected: Vec<_> = tools.iter().filter(|t| !allowed.contains(&t.as_str())).collect();
+                if !unexpected.is_empty() {
+                    error!("SECURITY: Unexpected tools: {:?}", unexpected);
                     return Err("Security violation".to_string());
                 }
                 if let Some(sid) = sid {
@@ -448,7 +511,7 @@ fn spawn_process(resume_session: Option<&str>) -> Result<Child, String> {
         "--output-format", "stream-json",
         "--verbose",
         "--model", "opus",
-        "--tools", "",  // SECURITY: disable all tools
+        "--tools", "WebSearch",  // SECURITY: only allow read-only web search
         "--json-schema", &schema_str,
     ]);
 
@@ -508,11 +571,9 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
                         so.tool_calls
                             .iter()
                             .enumerate()
-                            .filter_map(|(i, tc)| {
-                                tc.to_tool_call().map(|call| ToolCallWithId {
-                                    id: format!("tool_{}", i),
-                                    call,
-                                })
+                            .map(|(i, tc)| ToolCallWithId {
+                                id: format!("tool_{}", i),
+                                call: tc.to_tool_call(),
                             })
                             .collect()
                     }
@@ -535,10 +596,11 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
 fn format_tool_results(results: &[ToolResult]) -> String {
     let mut s = String::from("Tool results:\n");
     for r in results {
+        let content = r.content.as_deref().unwrap_or("ok");
         s.push_str(&format!(
             "- {}: {}{}\n",
             r.tool_use_id,
-            r.content,
+            content,
             if r.is_error { " (ERROR)" } else { "" }
         ));
     }

@@ -23,8 +23,13 @@ pub enum ToolCall {
         reply_to_message_id: Option<i64>,
     },
 
-    /// Get info about a user.
-    GetUserInfo { user_id: i64 },
+    /// Get info about a user by ID or username.
+    GetUserInfo {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+    },
 
     /// Read messages from archive.
     ReadMessages {
@@ -48,12 +53,6 @@ pub enum ToolCall {
         message_id: i64,
         /// Emoji to react with (e.g. "👍", "❤", "🔥", "😂")
         emoji: String,
-    },
-
-    /// Search the web for information.
-    WebSearch {
-        /// Search query
-        query: String,
     },
 
     /// Delete a message (admin action - use for spam/abuse).
@@ -120,8 +119,69 @@ pub enum ToolCall {
         reply_to_message_id: Option<i64>,
     },
 
+    // === Memory Tools ===
+
+    /// Create a new memory file. Fails if file already exists.
+    CreateMemory {
+        /// Relative path within memories directory (e.g. "users/nodir.md")
+        path: String,
+        /// Content to write
+        content: String,
+    },
+
+    /// Read a memory file with line numbers.
+    ReadMemory {
+        /// Relative path within memories directory
+        path: String,
+    },
+
+    /// Edit a memory file. Requires the file to have been read first.
+    EditMemory {
+        /// Relative path within memories directory
+        path: String,
+        /// Exact string to find and replace
+        old_string: String,
+        /// Replacement string
+        new_string: String,
+    },
+
+    /// List files in the memories directory.
+    ListMemories {
+        /// Optional subdirectory path (default: root of memories)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+
+    /// Search for a pattern across memory files (like grep).
+    SearchMemories {
+        /// Search pattern (substring match)
+        pattern: String,
+        /// Optional subdirectory to search in
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+
+    /// Delete a memory file.
+    DeleteMemory {
+        /// Relative path within memories directory
+        path: String,
+    },
+
+    /// Report a bug or issue to the developer (Claude Code).
+    ReportBug {
+        /// Description of the bug or issue
+        description: String,
+        /// Severity: "low", "medium", "high", "critical"
+        #[serde(default)]
+        severity: Option<String>,
+    },
+
     /// Signal that processing is complete.
     Done,
+
+    /// Parse error - tool call couldn't be parsed. Error message will be sent back to model.
+    #[serde(skip)]
+    ParseError { message: String },
 }
 
 /// Get the tool definitions for Claude.
@@ -151,16 +211,19 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "get_user_info".to_string(),
-            description: "Get information about a user by their ID".to_string(),
+            description: "Get information about a user by ID or username. Username lookup only works for users seen in the group (Bot API limitation).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "user_id": {
                         "type": "integer",
                         "description": "The user ID to look up"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username to look up (case-insensitive partial match)"
                     }
-                },
-                "required": ["user_id"]
+                }
             }),
         },
         Tool {
@@ -212,20 +275,6 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     }
                 },
                 "required": ["chat_id", "message_id", "emoji"]
-            }),
-        },
-        Tool {
-            name: "web_search".to_string(),
-            description: "Search the web for current information. Use this when you need to look up facts, news, or anything that might be outdated in your training data.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
-                "required": ["query"]
             }),
         },
         Tool {
@@ -329,6 +378,88 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["chat_id", "prompt"]
             }),
         },
+        // === Memory Tools ===
+        Tool {
+            name: "create_memory".to_string(),
+            description: "Create a new memory file. Fails if file already exists - use edit_memory to modify existing files.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within memories directory (e.g. 'users/nodir.md')" },
+                    "content": { "type": "string", "description": "Content to write to the file" }
+                },
+                "required": ["path", "content"]
+            }),
+        },
+        Tool {
+            name: "read_memory".to_string(),
+            description: "Read a memory file. Returns content with line numbers. Must read before editing.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within memories directory" }
+                },
+                "required": ["path"]
+            }),
+        },
+        Tool {
+            name: "edit_memory".to_string(),
+            description: "Edit a memory file by replacing a string. File must have been read first in this session.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within memories directory" },
+                    "old_string": { "type": "string", "description": "Exact string to find and replace" },
+                    "new_string": { "type": "string", "description": "Replacement string" }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        Tool {
+            name: "list_memories".to_string(),
+            description: "List files in the memories directory.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional subdirectory path (default: root)" }
+                }
+            }),
+        },
+        Tool {
+            name: "search_memories".to_string(),
+            description: "Search for a pattern across memory files (like grep).".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Search pattern (substring match)" },
+                    "path": { "type": "string", "description": "Optional subdirectory to search in" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        Tool {
+            name: "delete_memory".to_string(),
+            description: "Delete a memory file.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within memories directory" }
+                },
+                "required": ["path"]
+            }),
+        },
+        Tool {
+            name: "report_bug".to_string(),
+            description: "Report a bug or issue to the developer (Claude Code). Use this when you encounter unexpected behavior, errors, or problems you can't resolve. The developer monitors these reports and will fix issues.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": { "type": "string", "description": "Detailed description of the bug or issue" },
+                    "severity": { "type": "string", "description": "Severity level: low, medium, high, or critical" }
+                },
+                "required": ["description"]
+            }),
+        },
         Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
@@ -379,20 +510,26 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "read_messages");
         assert_eq!(tools[3].name, "add_reaction");
-        assert_eq!(tools[4].name, "web_search");
-        assert_eq!(tools[5].name, "delete_message");
-        assert_eq!(tools[6].name, "mute_user");
-        assert_eq!(tools[7].name, "ban_user");
-        assert_eq!(tools[8].name, "kick_user");
-        assert_eq!(tools[9].name, "get_chat_admins");
-        assert_eq!(tools[10].name, "get_members");
-        assert_eq!(tools[11].name, "import_members");
-        assert_eq!(tools[12].name, "send_photo");
-        assert_eq!(tools[13].name, "done");
+        assert_eq!(tools[4].name, "delete_message");
+        assert_eq!(tools[5].name, "mute_user");
+        assert_eq!(tools[6].name, "ban_user");
+        assert_eq!(tools[7].name, "kick_user");
+        assert_eq!(tools[8].name, "get_chat_admins");
+        assert_eq!(tools[9].name, "get_members");
+        assert_eq!(tools[10].name, "import_members");
+        assert_eq!(tools[11].name, "send_photo");
+        assert_eq!(tools[12].name, "create_memory");
+        assert_eq!(tools[13].name, "read_memory");
+        assert_eq!(tools[14].name, "edit_memory");
+        assert_eq!(tools[15].name, "list_memories");
+        assert_eq!(tools[16].name, "search_memories");
+        assert_eq!(tools[17].name, "delete_memory");
+        assert_eq!(tools[18].name, "report_bug");
+        assert_eq!(tools[19].name, "done");
     }
 }

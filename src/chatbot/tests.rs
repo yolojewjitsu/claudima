@@ -493,7 +493,7 @@ mod tools {
         let mut mock_tg = MockTelegramApi::new();
         mock_tg.add_user(123456789, "owner", "Owner", true);
 
-        let call = ToolCall::GetUserInfo { user_id: 123456789 };
+        let call = ToolCall::GetUserInfo { user_id: Some(123456789), username: None };
 
         let result = call.execute(&mut mock_tg).unwrap();
 
