@@ -233,6 +233,7 @@ impl ChatbotEngine {
                     timestamp: chrono::Utc::now().format("%H:%M").to_string(),
                     text: message.to_string(),
                     reply_to: None,
+                    image: None,
                 };
                 {
                     let mut ctx = self.context.lock().await;
@@ -246,6 +247,11 @@ impl ChatbotEngine {
             Err(e) => error!("Failed to notify owner: {}", e),
         }
     }
+
+    /// Download an image from Telegram.
+    pub async fn download_image(&self, file_id: &str) -> Result<(Vec<u8>, String), String> {
+        self.telegram.download_image(file_id).await
+    }
 }
 
 /// Process pending messages by sending to Claude Code.
@@ -257,12 +263,29 @@ async fn process_messages(
     claude: &Mutex<ClaudeCode>,
     messages: &[ChatMessage],
 ) -> Result<(), String> {
-    // Format the new messages
+    // Collect images from messages
+    let images: Vec<_> = messages.iter()
+        .filter_map(|m| m.image.as_ref().map(|(data, mime)| {
+            let label = format!("Image from {} (msg {}):", m.username, m.message_id);
+            (label, data.clone(), mime.clone())
+        }))
+        .collect();
+
+    // Format the new messages (text only)
     let content = format_messages(messages);
-    info!("🤖 Sending to Claude: {} chars", content.len());
+    info!("🤖 Sending to Claude: {} chars, {} image(s)", content.len(), images.len());
 
     let mut claude = claude.lock().await;
-    let mut response = claude.send_message(content).await?;
+
+    // Send images first (if any)
+    let mut response = if !images.is_empty() {
+        // Send first image with the text content
+        let (label, data, mime) = images.into_iter().next().unwrap();
+        let combined = format!("{}\n\n{}", content, label);
+        claude.send_image_message(combined, data, mime).await?
+    } else {
+        claude.send_message(content).await?
+    };
 
     // Handle compaction - restore recent context and persistent memories
     if response.compacted {
@@ -329,6 +352,7 @@ async fn process_messages(
                     tool_use_id: tc.id.clone(),
                     content: None,
                     is_error: false,
+                    image: None,
                 });
                 continue;
             }
@@ -341,18 +365,34 @@ async fn process_messages(
             results.push(result);
         }
 
-        // Check for errors and results that Claude needs to see
+        // Check for errors, results, and images that Claude needs to see
         let has_error = results.iter().any(|r| r.is_error);
         let has_results = results.iter().any(|r| r.content.is_some());
+        let has_images = results.iter().any(|r| r.image.is_some());
 
         // Exit if done was called, no errors, and no results to show Claude
-        if has_done && !has_error && !has_results {
+        if has_done && !has_error && !has_results && !has_images {
             info!("✅ Done after {} iteration(s)", iteration + 1);
             return Ok(());
         }
 
+        // Extract any images before sending results
+        let images: Vec<_> = results.iter()
+            .filter_map(|r| r.image.as_ref().map(|(data, mime)| (data.clone(), mime.clone())))
+            .collect();
+
         // Send results back to Claude (query tools returned data it needs to see)
         response = claude.send_tool_results(results).await?;
+
+        // Send any generated images for Claude to see
+        for (image_data, media_type) in images {
+            info!("📷 Sending generated image to Claude ({} bytes)", image_data.len());
+            response = claude.send_image_message(
+                "Here's the image I just generated and sent:".to_string(),
+                image_data,
+                media_type,
+            ).await?;
+        }
 
         // Handle compaction after tool results
         if response.compacted {
@@ -432,7 +472,25 @@ async fn execute_tool(
             execute_import_members(database, config.data_dir.as_ref(), file_path).await
         }
         ToolCall::SendPhoto { chat_id, prompt, caption, reply_to_message_id } => {
-            execute_send_photo(config, telegram, *chat_id, prompt, caption.as_deref(), *reply_to_message_id).await
+            // Handle specially to include image data for Claude to see
+            match execute_send_image(config, telegram, *chat_id, prompt, caption.as_deref(), *reply_to_message_id).await {
+                Ok(image_data) => {
+                    return ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(format!("Image generated and sent (prompt: {})", prompt)),
+                        is_error: false,
+                        image: Some((image_data, "image/png".to_string())),
+                    };
+                }
+                Err(e) => {
+                    return ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(format!("error: {}", e)),
+                        is_error: true,
+                        image: None,
+                    };
+                }
+            }
         }
         // Memory tools
         ToolCall::CreateMemory { path, content } => {
@@ -465,11 +523,13 @@ async fn execute_tool(
             tool_use_id: tc.id.clone(),
             content,
             is_error: false,
+            image: None,
         },
         Err(e) => ToolResult {
             tool_use_id: tc.id.clone(),
             content: Some(format!("error: {}", e)),
             is_error: true,
+            image: None,
         },
     }
 }
@@ -525,6 +585,7 @@ async fn execute_send_message(
         timestamp: chrono::Utc::now().format("%H:%M").to_string(),
         text: text.to_string(),
         reply_to,
+        image: None,
     };
 
     {
@@ -753,14 +814,14 @@ async fn execute_import_members(
     }).to_string()))
 }
 
-async fn execute_send_photo(
+async fn execute_send_image(
     config: &ChatbotConfig,
     telegram: &TelegramClient,
     chat_id: i64,
     prompt: &str,
     caption: Option<&str>,
     reply_to_message_id: Option<i64>,
-) -> Result<Option<String>, String> {
+) -> Result<Vec<u8>, String> {
     info!("🎨 Generating image: {}", prompt);
 
     let api_key = config.gemini_api_key.as_ref()
@@ -769,9 +830,10 @@ async fn execute_send_photo(
     let gemini = GeminiClient::new(api_key.clone());
     let image = gemini.generate_image(prompt).await?;
 
-    telegram.send_photo(chat_id, image.data, caption, reply_to_message_id).await?;
+    let image_data = image.data.clone();
+    telegram.send_image(chat_id, image.data, caption, reply_to_message_id).await?;
 
-    Ok(None) // Action tool
+    Ok(image_data) // Return image data for Claude to see
 }
 
 // === Memory Tool Implementations ===

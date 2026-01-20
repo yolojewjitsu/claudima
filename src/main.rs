@@ -181,7 +181,24 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         if state.config.is_owner(user.id) {
             info!("📨 DM from {} ({})", username, user.id);
             if let Some(ref chatbot) = state.chatbot {
-                let chat_msg = telegram_to_chat_message(&msg);
+                // Download image if present
+                let image = if let Some(photos) = msg.photo() {
+                    if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
+                        match chatbot.download_image(&largest.file.id.0).await {
+                            Ok(img) => Some(img),
+                            Err(e) => {
+                                warn!("Failed to download image: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let chat_msg = telegram_to_chat_message_with_image(&msg, image);
                 chatbot.handle_message(chat_msg).await;
             }
             return Ok(());
@@ -207,16 +224,47 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         return Ok(());
     }
 
-    let text = match msg.text() {
-        Some(t) => t,
-        None => return Ok(()),
-    };
+    // Get text (or caption for images)
+    let text = msg.text().or_else(|| msg.caption());
+    let has_image = msg.photo().is_some();
+
+    // Skip if no text and no image
+    if text.is_none() && !has_image {
+        return Ok(());
+    }
 
     // Pass to chatbot
     if let Some(ref chatbot) = state.chatbot {
-        let chat_msg = telegram_to_chat_message(&msg);
+        // Download image if present
+        let image = if has_image {
+            // Get largest image size
+            if let Some(photos) = msg.photo() {
+                if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
+                    match chatbot.download_image(&largest.file.id.0).await {
+                        Ok(img) => Some(img),
+                        Err(e) => {
+                            warn!("Failed to download image: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let chat_msg = telegram_to_chat_message_with_image(&msg, image);
         chatbot.handle_message(chat_msg).await;
     }
+
+    let text = match text {
+        Some(t) => t,
+        None => return Ok(()), // Image-only messages skip spam filtering
+    };
 
     // Skip spam filter for owners
     if state.config.is_owner(user.id) {
@@ -285,7 +333,7 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
     Ok(())
 }
 
-fn telegram_to_chat_message(msg: &Message) -> ChatMessage {
+fn telegram_to_chat_message_with_image(msg: &Message, image: Option<(Vec<u8>, String)>) -> ChatMessage {
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0 as i64).unwrap_or(0);
     let username = user
@@ -294,7 +342,11 @@ fn telegram_to_chat_message(msg: &Message) -> ChatMessage {
         .to_string();
 
     let timestamp = msg.date.format("%Y-%m-%d %H:%M").to_string();
-    let text = msg.text().unwrap_or("").to_string();
+    // Use text, or caption (for images), or empty
+    let text = msg.text()
+        .or_else(|| msg.caption())
+        .unwrap_or("")
+        .to_string();
 
     let reply_to = msg.reply_to_message().map(|reply| {
         let reply_user = reply.from.as_ref();
@@ -318,6 +370,7 @@ fn telegram_to_chat_message(msg: &Message) -> ChatMessage {
         timestamp,
         text,
         reply_to,
+        image,
     }
 }
 

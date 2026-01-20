@@ -24,6 +24,9 @@ pub struct ChatMessage {
     pub timestamp: String,
     pub text: String,
     pub reply_to: Option<ReplyTo>,
+    /// Image data if message contains an image: (bytes, media_type)
+    #[serde(skip)]
+    pub image: Option<(Vec<u8>, String)>,
 }
 
 /// Max chars to include from quoted reply.

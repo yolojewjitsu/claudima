@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatPermissions, InputFile, MessageId, ParseMode, ReactionType, ReplyParameters};
+use teloxide::types::{ChatPermissions, FileId, InputFile, MessageId, ParseMode, ReactionType, ReplyParameters};
 use tracing::{info, warn};
 
 /// User info from Telegram.
@@ -215,18 +216,18 @@ impl TelegramClient {
         Ok(serde_json::to_string(&admin_list).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Send a photo from bytes.
-    pub async fn send_photo(
+    /// Send an image from bytes.
+    pub async fn send_image(
         &self,
         chat_id: i64,
-        photo_data: Vec<u8>,
+        image_data: Vec<u8>,
         caption: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        info!("📷 Sending photo to chat {} ({} bytes)", chat_id, photo_data.len());
+        info!("📷 Sending image to chat {} ({} bytes)", chat_id, image_data.len());
 
         let chat_id = ChatId(chat_id);
-        let input_file = InputFile::memory(photo_data).file_name("image.png");
+        let input_file = InputFile::memory(image_data).file_name("image.png");
 
         let mut request = self.bot.send_photo(chat_id, input_file);
 
@@ -240,9 +241,40 @@ impl TelegramClient {
         }
 
         request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
-            let msg = format!("Failed to send photo: {e}");
+            let msg = format!("Failed to send image: {e}");
             warn!("{}", msg);
             msg
         })
+    }
+
+    /// Download an image by file_id.
+    /// Returns (bytes, media_type).
+    pub async fn download_image(&self, file_id: &str) -> Result<(Vec<u8>, String), String> {
+        // Get file info
+        let file = self.bot.get_file(FileId(file_id.to_string())).await.map_err(|e| {
+            format!("Failed to get file info: {e}")
+        })?;
+
+        let file_path = &file.path;
+
+        // Download file content
+        let mut data = Vec::new();
+        self.bot.download_file(file_path, &mut data).await.map_err(|e| {
+            format!("Failed to download file: {e}")
+        })?;
+
+        // Determine media type from extension
+        let media_type = if file_path.ends_with(".jpg") || file_path.ends_with(".jpeg") {
+            "image/jpeg"
+        } else if file_path.ends_with(".png") {
+            "image/png"
+        } else if file_path.ends_with(".webp") {
+            "image/webp"
+        } else {
+            "image/jpeg" // Default for Telegram images
+        };
+
+        info!("📥 Downloaded image ({} bytes, {})", data.len(), media_type);
+        Ok((data, media_type.to_string()))
     }
 }

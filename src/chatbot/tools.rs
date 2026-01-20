@@ -105,7 +105,7 @@ pub enum ToolCall {
         file_path: String,
     },
 
-    /// Send a photo to a chat.
+    /// Send an image to a chat.
     SendPhoto {
         /// Target chat ID
         chat_id: i64,

@@ -72,6 +72,8 @@ pub struct ToolResult {
     /// None = no results to show Claude, Some = results Claude should see
     pub content: Option<String>,
     pub is_error: bool,
+    /// Optional image data (bytes, media_type) for Claude to see
+    pub image: Option<(Vec<u8>, String)>,
 }
 
 /// Response from Claude Code.
@@ -90,6 +92,8 @@ pub struct ClaudeCode {
 
 enum WorkerMessage {
     UserMessage(String),
+    /// Message with image: (text, image_data, media_type)
+    ImageMessage(String, Vec<u8>, String),
     ToolResults(Vec<ToolResult>),
 }
 
@@ -137,6 +141,24 @@ impl ClaudeCode {
             .await
             .ok_or_else(|| "Response channel closed".to_string())
     }
+
+    /// Send a message with an image and get response.
+    pub async fn send_image_message(
+        &mut self,
+        text: String,
+        image_data: Vec<u8>,
+        media_type: String,
+    ) -> Result<Response, String> {
+        self.tx
+            .send(WorkerMessage::ImageMessage(text, image_data, media_type))
+            .await
+            .map_err(|_| "Worker channel closed")?;
+
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| "Response channel closed".to_string())
+    }
 }
 
 #[derive(Serialize)]
@@ -149,7 +171,34 @@ struct InputMessage {
 #[derive(Serialize)]
 struct InputContent {
     role: String,
-    content: String,
+    content: MessageContent,
+}
+
+/// Message content - either plain text or multi-part (text + images).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    MultiPart(Vec<ContentPart>),
+}
+
+/// A part of multi-part content.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
+}
+
+/// Image source for base64-encoded images.
+#[derive(Serialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,7 +292,7 @@ struct RawToolCall {
     new_string: Option<String>,
     #[serde(default)]
     pattern: Option<String>,
-    // send_photo fields
+    // send_image fields
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
@@ -469,12 +518,19 @@ fn worker_loop(
 
     // Main loop
     while let Some(msg) = msg_rx.blocking_recv() {
-        let content = match msg {
-            WorkerMessage::UserMessage(content) => content,
-            WorkerMessage::ToolResults(results) => format_tool_results(&results),
-        };
+        match msg {
+            WorkerMessage::UserMessage(content) => {
+                send_message(&mut stdin, &content)?;
+            }
+            WorkerMessage::ImageMessage(text, image_data, media_type) => {
+                send_message_with_image(&mut stdin, &text, &image_data, &media_type)?;
+            }
+            WorkerMessage::ToolResults(results) => {
+                let content = format_tool_results(&results);
+                send_message(&mut stdin, &content)?;
+            }
+        }
 
-        send_message(&mut stdin, &content)?;
         let (response, new_sid) = wait_for_result(&mut out_rx)?;
 
         // Update session ID if changed
@@ -529,11 +585,33 @@ fn spawn_process(resume_session: Option<&str>) -> Result<Child, String> {
 }
 
 fn send_message(stdin: &mut ChildStdin, content: &str) -> Result<(), String> {
+    send_content(stdin, MessageContent::Text(content.to_string()))
+}
+
+fn send_message_with_image(stdin: &mut ChildStdin, text: &str, image_data: &[u8], media_type: &str) -> Result<(), String> {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(image_data);
+
+    let content = MessageContent::MultiPart(vec![
+        ContentPart::Text { text: text.to_string() },
+        ContentPart::Image {
+            source: ImageSource {
+                source_type: "base64".to_string(),
+                media_type: media_type.to_string(),
+                data: encoded,
+            },
+        },
+    ]);
+
+    send_content(stdin, content)
+}
+
+fn send_content(stdin: &mut ChildStdin, content: MessageContent) -> Result<(), String> {
     let msg = InputMessage {
         msg_type: "user".to_string(),
         message: InputContent {
             role: "user".to_string(),
-            content: content.to_string(),
+            content,
         },
     };
 
@@ -542,7 +620,11 @@ fn send_message(stdin: &mut ChildStdin, content: &str) -> Result<(), String> {
     stdin.write_all(b"\n").map_err(|e| format!("Write newline: {}", e))?;
     stdin.flush().map_err(|e| format!("Flush: {}", e))?;
 
-    debug!("Sent message (len={})", content.len());
+    let len = match &msg.message.content {
+        MessageContent::Text(s) => s.len(),
+        MessageContent::MultiPart(parts) => parts.len(),
+    };
+    debug!("Sent message (len={})", len);
     Ok(())
 }
 
