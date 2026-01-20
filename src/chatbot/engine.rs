@@ -377,7 +377,9 @@ async fn process_messages(
             info!("🔧 Executing: {:?}", tc.call);
             let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to).await;
             if let Some(ref content) = result.content {
-                info!("Result: {}", &content[..content.len().min(100)]);
+                // Safely truncate to ~100 chars without breaking UTF-8
+                let truncated: String = content.chars().take(100).collect();
+                info!("Result: {}", truncated);
             }
             results.push(result);
         }
@@ -462,7 +464,25 @@ async fn execute_tool(
             execute_send_message(config, context, database, telegram, *chat_id, text, reply_to).await
         }
         ToolCall::GetUserInfo { user_id, username } => {
-            execute_get_user_info(config, database, telegram, *user_id, username.as_deref()).await
+            // Handle specially to include profile photo for Claude to see
+            match execute_get_user_info(config, database, telegram, *user_id, username.as_deref()).await {
+                Ok((content, profile_photo)) => {
+                    return ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(content),
+                        is_error: false,
+                        image: profile_photo.map(|data| (data, "image/jpeg".to_string())),
+                    };
+                }
+                Err(e) => {
+                    return ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(format!("error: {}", e)),
+                        is_error: true,
+                        image: None,
+                    };
+                }
+            }
         }
         ToolCall::ReadMessages { last_n, from_date, to_date, username, limit } => {
             execute_read_messages(database, *last_n, from_date.as_deref(), to_date.as_deref(), username.as_deref(), *limit).await
@@ -627,15 +647,14 @@ async fn execute_send_message(
     Ok(None) // Action tool - no results for Claude
 }
 
+/// Returns (json_info, optional_profile_photo_bytes)
 async fn execute_get_user_info(
     config: &ChatbotConfig,
     database: &Mutex<Database>,
     telegram: &TelegramClient,
     user_id: Option<i64>,
     username: Option<&str>,
-) -> Result<Option<String>, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-
+) -> Result<(String, Option<Vec<u8>>), String> {
     // Resolve user_id from username if needed
     let resolved_id = if let Some(id) = user_id {
         id
@@ -652,15 +671,14 @@ async fn execute_get_user_info(
 
     // Try to get profile photo
     let profile_photo = match telegram.get_profile_photo(resolved_id).await {
-        Ok(Some(data)) => Some(BASE64.encode(&data)),
-        Ok(None) => None,
+        Ok(photo) => photo,
         Err(e) => {
             warn!("Failed to get profile photo: {e}");
             None
         }
     };
 
-    Ok(Some(serde_json::json!({
+    let json_info = serde_json::json!({
         "user_id": info.user_id,
         "username": info.username,
         "first_name": info.first_name,
@@ -670,8 +688,10 @@ async fn execute_get_user_info(
         "language_code": info.language_code,
         "status": info.status,
         "custom_title": info.custom_title,
-        "profile_photo_base64": profile_photo
-    }).to_string()))
+        "has_profile_photo": profile_photo.is_some()
+    }).to_string();
+
+    Ok((json_info, profile_photo))
 }
 
 async fn execute_read_messages(
