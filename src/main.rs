@@ -14,7 +14,7 @@ use teloxide::types::ChatKind;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
-use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient};
+use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, Whisper};
 use classifier::{classify, Classification};
 use claude::Client as ClaudeClient;
 use config::Config;
@@ -26,6 +26,7 @@ struct BotState {
     strikes: Mutex<HashMap<UserId, u8>>,
     chatbot: Option<ChatbotEngine>,
     dm_denied: Mutex<std::collections::HashSet<UserId>>,
+    whisper: Option<Whisper>,
 }
 
 impl BotState {
@@ -81,12 +82,30 @@ impl BotState {
             None
         };
 
+        // Initialize Whisper if model path is configured
+        let whisper = if let Some(ref model_path) = config.whisper_model_path {
+            match Whisper::new(model_path) {
+                Ok(w) => {
+                    info!("Whisper loaded from {:?}", model_path);
+                    Some(w)
+                }
+                Err(e) => {
+                    warn!("Failed to load Whisper model: {}", e);
+                    None
+                }
+            }
+        } else {
+            info!("No Whisper model configured - voice transcription disabled");
+            None
+        };
+
         Self {
             config,
             claude,
             strikes: Mutex::new(HashMap::new()),
             chatbot,
             dm_denied: Mutex::new(std::collections::HashSet::new()),
+            whisper,
         }
     }
 
@@ -198,7 +217,10 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
                     None
                 };
 
-                let chat_msg = telegram_to_chat_message_with_image(&msg, image);
+                // Transcribe voice if present
+                let voice_transcription = transcribe_voice(&bot, &state, &msg).await;
+
+                let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription);
                 chatbot.handle_message(chat_msg).await;
             }
             return Ok(());
@@ -224,12 +246,13 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         return Ok(());
     }
 
-    // Get text (or caption for images)
+    // Get text (or caption for images/voice)
     let text = msg.text().or_else(|| msg.caption());
     let has_image = msg.photo().is_some();
+    let has_voice = msg.voice().is_some();
 
-    // Skip if no text and no image
-    if text.is_none() && !has_image {
+    // Skip if no text, image, or voice
+    if text.is_none() && !has_image && !has_voice {
         return Ok(());
     }
 
@@ -257,7 +280,10 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
             None
         };
 
-        let chat_msg = telegram_to_chat_message_with_image(&msg, image);
+        // Transcribe voice if present
+        let voice_transcription = transcribe_voice(&bot, &state, &msg).await;
+
+        let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription);
         chatbot.handle_message(chat_msg).await;
     }
 
@@ -333,7 +359,11 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
     Ok(())
 }
 
-fn telegram_to_chat_message_with_image(msg: &Message, image: Option<(Vec<u8>, String)>) -> ChatMessage {
+fn telegram_to_chat_message_with_media(
+    msg: &Message,
+    image: Option<(Vec<u8>, String)>,
+    voice_transcription: Option<String>,
+) -> ChatMessage {
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0 as i64).unwrap_or(0);
     let username = user
@@ -342,7 +372,7 @@ fn telegram_to_chat_message_with_image(msg: &Message, image: Option<(Vec<u8>, St
         .to_string();
 
     let timestamp = msg.date.format("%Y-%m-%d %H:%M").to_string();
-    // Use text, or caption (for images), or empty
+    // Use text, or caption (for images/voice), or empty
     let text = msg.text()
         .or_else(|| msg.caption())
         .unwrap_or("")
@@ -371,6 +401,56 @@ fn telegram_to_chat_message_with_image(msg: &Message, image: Option<(Vec<u8>, St
         text,
         reply_to,
         image,
+        voice_transcription,
+    }
+}
+
+/// Download and transcribe a voice message if present.
+/// Returns the transcription, or an error message if transcription failed.
+async fn transcribe_voice(bot: &Bot, state: &BotState, msg: &Message) -> Option<String> {
+    use teloxide::net::Download;
+
+    let voice = msg.voice()?;
+
+    let whisper = match state.whisper.as_ref() {
+        Some(w) => w,
+        None => {
+            warn!("Voice message received but Whisper not configured");
+            return Some("[Voice message - transcription not available (Whisper not configured)]".to_string());
+        }
+    };
+
+    info!("🎤 Voice message from user {} ({} seconds)",
+          msg.from.as_ref().map(|u| u.id.0).unwrap_or(0),
+          voice.duration);
+
+    // Download voice file
+    let file = match bot.get_file(voice.file.id.clone()).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Failed to get voice file info: {}", e);
+            return Some(format!("[Voice message - download failed: {}]", e));
+        }
+    };
+
+    let mut data = Vec::new();
+    if let Err(e) = bot.download_file(&file.path, &mut data).await {
+        warn!("Failed to download voice file: {}", e);
+        return Some(format!("[Voice message - download failed: {}]", e));
+    }
+
+    info!("📥 Downloaded voice ({} bytes)", data.len());
+
+    // Transcribe
+    match whisper.transcribe(&data) {
+        Ok(text) => {
+            info!("📝 Transcribed: \"{}\"", &text[..text.len().min(100)]);
+            Some(text)
+        }
+        Err(e) => {
+            warn!("Transcription failed: {}", e);
+            Some(format!("[Voice message - transcription failed: {}]", e))
+        }
     }
 }
 

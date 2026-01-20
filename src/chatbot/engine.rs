@@ -234,6 +234,7 @@ impl ChatbotEngine {
                     text: message.to_string(),
                     reply_to: None,
                     image: None,
+                    voice_transcription: None,
                 };
                 {
                     let mut ctx = self.context.lock().await;
@@ -586,6 +587,7 @@ async fn execute_send_message(
         text: text.to_string(),
         reply_to,
         image: None,
+        voice_transcription: None,
     };
 
     {

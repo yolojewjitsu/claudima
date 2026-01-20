@@ -277,4 +277,22 @@ impl TelegramClient {
         info!("📥 Downloaded image ({} bytes, {})", data.len(), media_type);
         Ok((data, media_type.to_string()))
     }
+
+    /// Download a voice message by file_id.
+    /// Returns raw OGG Opus bytes.
+    pub async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        let file = self.bot.get_file(FileId(file_id.to_string())).await.map_err(|e| {
+            format!("Failed to get voice file info: {e}")
+        })?;
+
+        let file_path = &file.path;
+
+        let mut data = Vec::new();
+        self.bot.download_file(file_path, &mut data).await.map_err(|e| {
+            format!("Failed to download voice file: {e}")
+        })?;
+
+        info!("🎤 Downloaded voice message ({} bytes)", data.len());
+        Ok(data)
+    }
 }

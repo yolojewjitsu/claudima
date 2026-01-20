@@ -8,7 +8,7 @@ use teloxide::types::{ChatId, UserId};
 struct ConfigFile {
     owner_ids: Vec<u64>,
     telegram_bot_token: String,
-    /// API key - only required if use_claude_code is false
+    /// Anthropic API key for spam classification (Haiku)
     #[serde(default)]
     anthropic_api_key: String,
     /// Gemini API key for image generation
@@ -29,6 +29,8 @@ struct ConfigFile {
     log_chat_id: Option<i64>,
     /// Directory for state files (logs, context). Defaults to current directory.
     data_dir: Option<String>,
+    /// Path to Whisper model file (.bin) for voice transcription.
+    whisper_model_path: Option<String>,
 }
 
 fn default_max_strikes() -> u8 {
@@ -49,6 +51,8 @@ pub struct Config {
     pub log_chat_id: Option<ChatId>,
     /// Directory for state files (logs, context).
     pub data_dir: PathBuf,
+    /// Path to Whisper model file (.bin) for voice transcription.
+    pub whisper_model_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -96,6 +100,7 @@ impl Config {
             dry_run: file.dry_run,
             log_chat_id: file.log_chat_id.map(ChatId),
             data_dir,
+            whisper_model_path: file.whisper_model_path.map(PathBuf::from),
         }
     }
 

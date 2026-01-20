@@ -130,6 +130,8 @@ mod tests {
             timestamp: "10:00".to_string(),
             text: text.to_string(),
             reply_to: None,
+            image: None,
+            voice_transcription: None,
         }
     }
 

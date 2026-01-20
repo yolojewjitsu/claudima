@@ -9,8 +9,10 @@ pub mod gemini;
 pub mod message;
 pub mod telegram;
 pub mod tools;
+pub mod whisper;
 
 pub use claude_code::ClaudeCode;
 pub use engine::{system_prompt, ChatbotConfig, ChatbotEngine};
 pub use message::{ChatMessage, ReplyTo};
 pub use telegram::TelegramClient;
+pub use whisper::Whisper;

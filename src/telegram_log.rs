@@ -113,9 +113,10 @@ impl<S: Subscriber> Layer<S> for TelegramLogLayer {
         };
         event.record(&mut visitor);
 
-        // Pass message as-is - category emojis are in the log statements
+        // Add emoji prefix for WARN/ERROR levels
         let msg = match level {
-            Level::ERROR | Level::WARN => LogMessage::Urgent(visitor.message),
+            Level::ERROR => LogMessage::Urgent(format!("❌ {}", visitor.message)),
+            Level::WARN => LogMessage::Urgent(format!("⚠️ {}", visitor.message)),
             _ => LogMessage::Info(visitor.message),
         };
 
