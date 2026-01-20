@@ -12,6 +12,12 @@ pub struct ChatMemberInfo {
     pub user_id: i64,
     pub username: Option<String>,
     pub first_name: String,
+    pub last_name: Option<String>,
+    pub is_bot: bool,
+    pub is_premium: bool,
+    pub language_code: Option<String>,
+    pub status: String,
+    pub custom_title: Option<String>,
 }
 
 /// Telegram API client.
@@ -67,11 +73,62 @@ impl TelegramClient {
                 msg
             })?;
 
+        // Extract status and custom title from member kind
+        let (status, custom_title) = match &member.kind {
+            teloxide::types::ChatMemberKind::Owner(o) => ("owner".to_string(), o.custom_title.clone()),
+            teloxide::types::ChatMemberKind::Administrator(a) => ("administrator".to_string(), a.custom_title.clone()),
+            teloxide::types::ChatMemberKind::Member(_) => ("member".to_string(), None),
+            teloxide::types::ChatMemberKind::Restricted(_) => ("restricted".to_string(), None),
+            teloxide::types::ChatMemberKind::Left => ("left".to_string(), None),
+            teloxide::types::ChatMemberKind::Banned(_) => ("banned".to_string(), None),
+        };
+
         Ok(ChatMemberInfo {
             user_id: member.user.id.0 as i64,
             username: member.user.username.clone(),
             first_name: member.user.first_name.clone(),
+            last_name: member.user.last_name.clone(),
+            is_bot: member.user.is_bot,
+            is_premium: member.user.is_premium,
+            language_code: member.user.language_code.clone(),
+            status,
+            custom_title,
         })
+    }
+
+    /// Get user's profile photo as bytes.
+    pub async fn get_profile_photo(&self, user_id: i64) -> Result<Option<Vec<u8>>, String> {
+        info!("Getting profile photo for user {}", user_id);
+        let user_id = UserId(user_id as u64);
+
+        let photos = self
+            .bot
+            .get_user_profile_photos(user_id)
+            .limit(1)
+            .await
+            .map_err(|e| format!("Failed to get profile photos: {e}"))?;
+
+        if photos.photos.is_empty() {
+            return Ok(None);
+        }
+
+        // Get the smallest photo (first in the array, usually 160x160)
+        let photo_sizes = &photos.photos[0];
+        if photo_sizes.is_empty() {
+            return Ok(None);
+        }
+
+        // Get the largest available size for better quality
+        let photo = photo_sizes.last().unwrap();
+        let file = self.bot.get_file(photo.file.id.clone()).await
+            .map_err(|e| format!("Failed to get photo file: {e}"))?;
+
+        let mut data = Vec::new();
+        self.bot.download_file(&file.path, &mut data).await
+            .map_err(|e| format!("Failed to download photo: {e}"))?;
+
+        info!("Downloaded profile photo ({} bytes)", data.len());
+        Ok(Some(data))
     }
 
     pub async fn set_message_reaction(

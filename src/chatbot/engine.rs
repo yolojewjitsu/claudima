@@ -634,6 +634,8 @@ async fn execute_get_user_info(
     user_id: Option<i64>,
     username: Option<&str>,
 ) -> Result<Option<String>, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
     // Resolve user_id from username if needed
     let resolved_id = if let Some(id) = user_id {
         id
@@ -647,10 +649,28 @@ async fn execute_get_user_info(
     };
 
     let info = telegram.get_chat_member(config.primary_chat_id, resolved_id).await?;
+
+    // Try to get profile photo
+    let profile_photo = match telegram.get_profile_photo(resolved_id).await {
+        Ok(Some(data)) => Some(BASE64.encode(&data)),
+        Ok(None) => None,
+        Err(e) => {
+            warn!("Failed to get profile photo: {e}");
+            None
+        }
+    };
+
     Ok(Some(serde_json::json!({
         "user_id": info.user_id,
         "username": info.username,
-        "first_name": info.first_name
+        "first_name": info.first_name,
+        "last_name": info.last_name,
+        "is_bot": info.is_bot,
+        "is_premium": info.is_premium,
+        "language_code": info.language_code,
+        "status": info.status,
+        "custom_title": info.custom_title,
+        "profile_photo_base64": profile_photo
     }).to_string()))
 }
 
@@ -1211,6 +1231,22 @@ IMPORTANT: Use the EXACT chat attribute value when responding with send_message.
 
 **In groups:** Respond when mentioned or replied to. Stay quiet otherwise.
 **In DMs:** Only the owner can DM you. Always respond.
+
+# Before You Respond: Research the User
+
+Before crafting your response, gather context about who you're talking to:
+
+1. **get_user_info** - Check their profile: name, username, premium status, profile photo
+2. **Memory files** - Read any notes about this user from memories/
+3. **Web search** - If they seem notable or you want to personalize, search for them
+
+This helps you:
+- Address them by name naturally
+- Remember past interactions (from memories)
+- Tailor your response to who they are
+- Avoid asking questions you could answer yourself
+
+Don't overdo it - a quick check is enough. The goal is context, not stalking.
 
 # Personality
 

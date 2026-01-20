@@ -225,7 +225,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "get_user_info".to_string(),
-            description: "Get information about a user by ID or username. Username lookup only works for users seen in the group (Bot API limitation).".to_string(),
+            description: "Get detailed information about a user including their profile photo. Returns: user_id, username, first_name, last_name, is_bot, is_premium, language_code, status (owner/administrator/member/restricted/banned), custom_title, and profile_photo_base64. Username lookup only works for users seen in the group.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
