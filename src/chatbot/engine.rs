@@ -333,6 +333,9 @@ async fn process_messages(
     // Track which memory files have been read (for edit validation)
     let mut memory_files_read: HashSet<String> = HashSet::new();
 
+    // Get the last message ID for default reply-to (maintains conversation threads)
+    let default_reply_to = messages.last().map(|m| m.message_id);
+
     // Tool call loop
     for iteration in 0..MAX_ITERATIONS {
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
@@ -359,7 +362,7 @@ async fn process_messages(
             }
 
             info!("🔧 Executing: {:?}", tc.call);
-            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read).await;
+            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to).await;
             if let Some(ref content) = result.content {
                 info!("Result: {}", &content[..content.len().min(100)]);
             }
@@ -437,10 +440,13 @@ async fn execute_tool(
     telegram: &TelegramClient,
     tc: &ToolCallWithId,
     memory_files_read: &mut HashSet<String>,
+    default_reply_to: Option<i64>,
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
-            execute_send_message(config, context, database, telegram, *chat_id, text, *reply_to_message_id).await
+            // Use default_reply_to if none specified (maintains conversation threads)
+            let reply_to = reply_to_message_id.or(default_reply_to);
+            execute_send_message(config, context, database, telegram, *chat_id, text, reply_to).await
         }
         ToolCall::GetUserInfo { user_id, username } => {
             execute_get_user_info(config, database, telegram, *user_id, username.as_deref()).await
@@ -474,7 +480,9 @@ async fn execute_tool(
         }
         ToolCall::SendPhoto { chat_id, prompt, caption, reply_to_message_id } => {
             // Handle specially to include image data for Claude to see
-            match execute_send_image(config, telegram, *chat_id, prompt, caption.as_deref(), *reply_to_message_id).await {
+            // Use default_reply_to if none specified (maintains conversation threads)
+            let reply_to = reply_to_message_id.or(default_reply_to);
+            match execute_send_image(config, telegram, *chat_id, prompt, caption.as_deref(), reply_to).await {
                 Ok(image_data) => {
                     return ToolResult {
                         tool_use_id: tc.id.clone(),
