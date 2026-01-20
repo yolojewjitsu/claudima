@@ -149,10 +149,10 @@ impl Database {
 
     fn mark_dirty(&self) {
         let count = self.unsaved_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if count >= SAVE_INTERVAL {
-            if let Err(e) = self.save() {
-                warn!("Auto-save failed: {e}");
-            }
+        if count >= SAVE_INTERVAL
+            && let Err(e) = self.save()
+        {
+            warn!("Auto-save failed: {e}");
         }
     }
 
@@ -186,12 +186,6 @@ impl Database {
         }
         self.messages.insert(msg.message_id, msg);
         self.mark_dirty();
-    }
-
-    /// Get a message by ID.
-    #[cfg(test)]
-    pub fn get_message(&self, message_id: i64) -> Option<&ChatMessage> {
-        self.messages.get(&message_id)
     }
 
     /// Total message count.
@@ -300,12 +294,12 @@ impl Database {
         let mut count = 0;
 
         for m in imported {
-            if !self.members.contains_key(&m.user_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.members.entry(m.user_id) {
                 let first_name = m.first_name
                     .or_else(|| m.username.clone())
                     .unwrap_or_else(|| format!("User{}", m.user_id));
 
-                self.members.insert(m.user_id, Member {
+                e.insert(Member {
                     user_id: m.user_id,
                     username: m.username,
                     first_name,

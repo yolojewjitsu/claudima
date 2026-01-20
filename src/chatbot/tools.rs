@@ -119,6 +119,20 @@ pub enum ToolCall {
         reply_to_message_id: Option<i64>,
     },
 
+    /// Send a voice message (TTS).
+    SendVoice {
+        /// Target chat ID
+        chat_id: i64,
+        /// Text to convert to speech
+        text: String,
+        /// Optional voice name (default: "af_heart" - American English female)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        voice: Option<String>,
+        /// Optional message ID to reply to
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_message_id: Option<i64>,
+    },
+
     // === Memory Tools ===
 
     /// Create a new memory file. Fails if file already exists.
@@ -378,6 +392,20 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["chat_id", "prompt"]
             }),
         },
+        Tool {
+            name: "send_voice".to_string(),
+            description: "Send a voice message using text-to-speech. Use this to speak to users instead of typing. Good for greetings, announcements, or when a voice reply feels more personal.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": { "type": "integer", "description": "Target chat ID" },
+                    "text": { "type": "string", "description": "Text to convert to speech" },
+                    "voice": { "type": "string", "description": "Voice name (default: 'af_heart' - American English female). Options: af_heart, af_bella, am_adam, am_michael" },
+                    "reply_to_message_id": { "type": "integer", "description": "Optional message ID to reply to" }
+                },
+                "required": ["chat_id", "text"]
+            }),
+        },
         // === Memory Tools ===
         Tool {
             name: "create_memory".to_string(),
@@ -510,7 +538,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "read_messages");
@@ -523,13 +551,14 @@ mod tests {
         assert_eq!(tools[9].name, "get_members");
         assert_eq!(tools[10].name, "import_members");
         assert_eq!(tools[11].name, "send_photo");
-        assert_eq!(tools[12].name, "create_memory");
-        assert_eq!(tools[13].name, "read_memory");
-        assert_eq!(tools[14].name, "edit_memory");
-        assert_eq!(tools[15].name, "list_memories");
-        assert_eq!(tools[16].name, "search_memories");
-        assert_eq!(tools[17].name, "delete_memory");
-        assert_eq!(tools[18].name, "report_bug");
-        assert_eq!(tools[19].name, "done");
+        assert_eq!(tools[12].name, "send_voice");
+        assert_eq!(tools[13].name, "create_memory");
+        assert_eq!(tools[14].name, "read_memory");
+        assert_eq!(tools[15].name, "edit_memory");
+        assert_eq!(tools[16].name, "list_memories");
+        assert_eq!(tools[17].name, "search_memories");
+        assert_eq!(tools[18].name, "delete_memory");
+        assert_eq!(tools[19].name, "report_bug");
+        assert_eq!(tools[20].name, "done");
     }
 }

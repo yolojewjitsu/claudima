@@ -31,6 +31,8 @@ struct ConfigFile {
     data_dir: Option<String>,
     /// Path to Whisper model file (.bin) for voice transcription.
     whisper_model_path: Option<String>,
+    /// TTS endpoint for Kokoro-FastAPI (e.g., "http://localhost:8880").
+    tts_endpoint: Option<String>,
 }
 
 fn default_max_strikes() -> u8 {
@@ -53,6 +55,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Path to Whisper model file (.bin) for voice transcription.
     pub whisper_model_path: Option<PathBuf>,
+    /// TTS endpoint for Kokoro-FastAPI (e.g., "http://localhost:8880").
+    pub tts_endpoint: Option<String>,
 }
 
 impl Config {
@@ -101,6 +105,7 @@ impl Config {
             log_chat_id: file.log_chat_id.map(ChatId),
             data_dir,
             whisper_model_path: file.whisper_model_path.map(PathBuf::from),
+            tts_endpoint: file.tts_endpoint,
         }
     }
 

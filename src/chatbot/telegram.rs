@@ -278,21 +278,35 @@ impl TelegramClient {
         Ok((data, media_type.to_string()))
     }
 
-    /// Download a voice message by file_id.
-    /// Returns raw OGG Opus bytes.
-    pub async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>, String> {
-        let file = self.bot.get_file(FileId(file_id.to_string())).await.map_err(|e| {
-            format!("Failed to get voice file info: {e}")
-        })?;
+    /// Send a voice message from bytes (OGG Opus format).
+    pub async fn send_voice(
+        &self,
+        chat_id: i64,
+        voice_data: Vec<u8>,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<i64, String> {
+        info!("🔊 Sending voice to chat {} ({} bytes)", chat_id, voice_data.len());
 
-        let file_path = &file.path;
+        let chat_id = ChatId(chat_id);
+        let input_file = InputFile::memory(voice_data).file_name("voice.ogg");
 
-        let mut data = Vec::new();
-        self.bot.download_file(file_path, &mut data).await.map_err(|e| {
-            format!("Failed to download voice file: {e}")
-        })?;
+        let mut request = self.bot.send_voice(chat_id, input_file);
 
-        info!("🎤 Downloaded voice message ({} bytes)", data.len());
-        Ok(data)
+        if let Some(cap) = caption {
+            request = request.caption(cap);
+        }
+
+        if let Some(msg_id) = reply_to_message_id {
+            let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
+            request = request.reply_parameters(reply_params);
+        }
+
+        request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
+            let msg = format!("Failed to send voice: {e}");
+            warn!("{}", msg);
+            msg
+        })
     }
+
 }

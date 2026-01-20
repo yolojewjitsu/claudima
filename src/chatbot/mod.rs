@@ -9,6 +9,7 @@ pub mod gemini;
 pub mod message;
 pub mod telegram;
 pub mod tools;
+pub mod tts;
 pub mod whisper;
 
 pub use claude_code::ClaudeCode;

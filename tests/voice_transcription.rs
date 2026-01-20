@@ -6,25 +6,23 @@
 //!
 //! Run with: cargo test --features integ_test --test voice_transcription
 
-use std::path::PathBuf;
-
-/// Path to test Whisper model (set via env var or default location)
-fn get_test_model_path() -> PathBuf {
-    std::env::var("WHISPER_MODEL_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data/test/ggml-base.en.bin"))
-}
-
-/// Path to test audio files
-fn get_test_audio_dir() -> PathBuf {
-    PathBuf::from("data/test/audio")
-}
-
 #[cfg(feature = "integ_test")]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
     use claudir::chatbot::whisper::Whisper;
     use claudir::chatbot::message::ChatMessage;
+
+    /// Path to test Whisper model (set via env var or default location)
+    fn get_test_model_path() -> PathBuf {
+        std::env::var("WHISPER_MODEL_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("data/test/ggml-base.en.bin"))
+    }
+
+    /// Path to test audio files
+    fn get_test_audio_dir() -> PathBuf {
+        PathBuf::from("data/test/audio")
+    }
 
     /// Test that Whisper loads successfully.
     #[test]

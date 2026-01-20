@@ -302,6 +302,9 @@ struct RawToolCall {
     description: Option<String>,
     #[serde(default)]
     severity: Option<String>,
+    // send_voice fields
+    #[serde(default)]
+    voice: Option<String>,
 }
 
 impl RawToolCall {
@@ -371,6 +374,12 @@ impl RawToolCall {
                     caption: self.caption.clone(),
                     reply_to_message_id: self.reply_to_message_id,
                 }),
+                "send_voice" => Ok(ToolCall::SendVoice {
+                    chat_id: self.chat_id.ok_or("send_voice requires chat_id")?,
+                    text: self.text.clone().ok_or("send_voice requires text")?,
+                    voice: self.voice.clone(),
+                    reply_to_message_id: self.reply_to_message_id,
+                }),
                 // Memory tools
                 "create_memory" => Ok(ToolCall::CreateMemory {
                     path: self.path.clone().ok_or("create_memory requires path")?,
@@ -400,7 +409,7 @@ impl RawToolCall {
                 }),
                 "done" => Ok(ToolCall::Done),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, read_messages, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, send_photo, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, done", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, read_messages, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, done", self.tool)),
             }
         };
 
@@ -534,12 +543,12 @@ fn worker_loop(
         let (response, new_sid) = wait_for_result(&mut out_rx)?;
 
         // Update session ID if changed
-        if let Some(sid) = new_sid {
-            if session_id.as_ref() != Some(&sid) {
-                session_id = Some(sid.clone());
-                if let Some(ref path) = session_file {
-                    save_session_id(path, &sid);
-                }
+        if let Some(sid) = new_sid
+            && session_id.as_ref() != Some(&sid)
+        {
+            session_id = Some(sid.clone());
+            if let Some(ref path) = session_file {
+                save_session_id(path, &sid);
             }
         }
 
@@ -636,13 +645,12 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
         match out_rx.blocking_recv() {
             Some(OutputMessage::Assistant { message }) => {
                 // Check for context compaction
-                if let Some(msg) = message {
-                    if let Some(ctx) = msg.context_management {
-                        if ctx.truncated_content_length.is_some() {
-                            warn!("Context compaction detected!");
-                            compacted = true;
-                        }
-                    }
+                if let Some(msg) = message
+                    && let Some(ctx) = msg.context_management
+                    && ctx.truncated_content_length.is_some()
+                {
+                    warn!("Context compaction detected!");
+                    compacted = true;
                 }
             }
             Some(OutputMessage::Result { total_cost_usd, structured_output, session_id }) => {

@@ -12,6 +12,7 @@ use crate::chatbot::context::ContextBuffer;
 use crate::chatbot::debounce::Debouncer;
 use crate::chatbot::gemini::GeminiClient;
 use crate::chatbot::message::{ChatMessage, ReplyTo};
+use crate::chatbot::tts::TtsClient;
 use crate::chatbot::database::Database;
 use crate::chatbot::telegram::TelegramClient;
 use crate::chatbot::tools::{get_tool_definitions, ToolCall};
@@ -32,6 +33,7 @@ pub struct ChatbotConfig {
     pub debounce_ms: u64,
     pub data_dir: Option<PathBuf>,
     pub gemini_api_key: Option<String>,
+    pub tts_endpoint: Option<String>,
 }
 
 impl Default for ChatbotConfig {
@@ -44,6 +46,7 @@ impl Default for ChatbotConfig {
             debounce_ms: 1000,
             data_dir: None,
             gemini_api_key: None,
+            tts_endpoint: None,
         }
     }
 }
@@ -341,8 +344,18 @@ async fn process_messages(
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
 
         if response.tool_calls.is_empty() {
-            info!("No tool calls, done");
-            return Ok(());
+            // No tool calls is an error - Claude must explicitly call done or another tool
+            warn!("No tool calls from Claude - sending error feedback");
+            response = claude
+                .send_tool_results(vec![ToolResult {
+                    tool_use_id: "error".to_string(),
+                    content: Some("ERROR: You must call at least one tool. Use the 'done' tool when you have nothing more to do.".to_string()),
+                    is_error: true,
+                    image: None,
+                }])
+                .await
+                .map_err(|e| format!("Claude error: {e}"))?;
+            continue;
         }
 
         // Check for done
@@ -500,6 +513,10 @@ async fn execute_tool(
                     };
                 }
             }
+        }
+        ToolCall::SendVoice { chat_id, text, voice, reply_to_message_id } => {
+            let reply_to = reply_to_message_id.or(default_reply_to);
+            execute_send_voice(config, telegram, *chat_id, text, voice.as_deref(), reply_to).await
         }
         // Memory tools
         ToolCall::CreateMemory { path, content } => {
@@ -846,6 +863,27 @@ async fn execute_send_image(
     Ok(image_data) // Return image data for Claude to see
 }
 
+async fn execute_send_voice(
+    config: &ChatbotConfig,
+    telegram: &TelegramClient,
+    chat_id: i64,
+    text: &str,
+    voice: Option<&str>,
+    reply_to_message_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    info!("🔊 TTS: \"{}\"", &text[..text.len().min(50)]);
+
+    let endpoint = config.tts_endpoint.as_ref()
+        .ok_or("TTS endpoint not configured")?;
+
+    let tts = TtsClient::new(endpoint.clone());
+    let voice_data = tts.synthesize(text, voice).await?;
+
+    telegram.send_voice(chat_id, voice_data, None, reply_to_message_id).await?;
+
+    Ok(None) // Action tool
+}
+
 // === Memory Tool Implementations ===
 
 /// Validate and resolve a memory path. Returns the full path if valid.
@@ -964,7 +1002,7 @@ async fn execute_edit_memory(
     // Find and replace
     let count = content.matches(old_string).count();
     if count == 0 {
-        return Err(format!("old_string not found in file. Make sure it matches exactly."));
+        return Err("old_string not found in file. Make sure it matches exactly.".to_string());
     }
     if count > 1 {
         return Err(format!("old_string found {} times. Must be unique.", count));
@@ -1043,13 +1081,13 @@ async fn execute_search_memories(
             let path = entry.path();
             if path.is_dir() {
                 search_recursive(&path, base, pattern, results)?;
-            } else if path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let rel_path = path.strip_prefix(base).unwrap_or(&path);
-                    for (line_num, line) in content.lines().enumerate() {
-                        if line.contains(pattern) {
-                            results.push(format!("{}:{}:{}", rel_path.display(), line_num + 1, line));
-                        }
+            } else if path.is_file()
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                let rel_path = path.strip_prefix(base).unwrap_or(&path);
+                for (line_num, line) in content.lines().enumerate() {
+                    if line.contains(pattern) {
+                        results.push(format!("{}:{}:{}", rel_path.display(), line_num + 1, line));
                     }
                 }
             }
@@ -1121,7 +1159,7 @@ async fn execute_report_bug(
 }
 
 /// Generate system prompt.
-pub fn system_prompt(config: &ChatbotConfig) -> String {
+pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>) -> String {
     let username_info = match &config.bot_username {
         Some(u) => format!("Your Telegram @username is @{}.", u),
         None => String::new(),
@@ -1137,6 +1175,13 @@ pub fn system_prompt(config: &ChatbotConfig) -> String {
         .map(|t| format!("- {}: {}", t.name, t.description))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let voice_info = match available_voices {
+        Some(voices) if !voices.is_empty() => {
+            format!("Available voices: {}. Pass the voice name to the `voice` parameter.", voices.join(", "))
+        }
+        _ => String::new(),
+    };
 
     format!(r#"# Who You Are
 
@@ -1184,6 +1229,7 @@ IMPORTANT: Use the EXACT chat attribute value when responding with send_message.
 - no forced enthusiasm, no filler phrases
 - if someone asks a simple question, give a simple answer
 - only write longer when genuinely needed (complex explanations they asked for)
+- Telegram uses HTML for formatting (<b>bold</b>, <i>italic</i>, <code>code</code>), NOT Markdown
 
 # Admin Tools
 
@@ -1206,6 +1252,20 @@ for pictures, memes, or visual content.
 
 **Rate limit:** Maximum 3 images per person per day. If someone exceeds this, politely
 tell them to try again tomorrow. Track this yourself based on who's asking.
+
+# Voice Messages
+
+You can send voice messages using `send_voice`. This converts text to speech and sends
+it as a Telegram voice message.
+
+{voice_info}
+
+Use it for:
+- Fun greetings or announcements
+- When a voice reply feels more personal
+- When users explicitly ask for voice
+
+Don't overuse it - text is usually better for information. Voice is for personality.
 
 # Memories (Persistent Storage)
 

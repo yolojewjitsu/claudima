@@ -58,10 +58,24 @@ impl BotState {
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
                 gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
+                tts_endpoint: config.tts_endpoint.clone(),
+            };
+
+            // Fetch available TTS voices if endpoint configured
+            let available_voices = if let Some(ref endpoint) = config.tts_endpoint {
+                use crate::chatbot::tts::TtsClient;
+                let tts = TtsClient::new(endpoint.clone());
+                let voices = tts.list_voices().await;
+                if !voices.is_empty() {
+                    info!("TTS voices available: {}", voices.join(", "));
+                }
+                Some(voices)
+            } else {
+                None
             };
 
             // Start Claude Code with system prompt and session persistence
-            let prompt = system_prompt(&chatbot_config);
+            let prompt = system_prompt(&chatbot_config, available_voices.as_deref());
             let session_file = Some(config.data_dir.join("session_id"));
             let claude_code = match ClaudeCode::start(prompt, session_file) {
                 Ok(cc) => cc,

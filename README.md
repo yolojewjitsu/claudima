@@ -50,6 +50,51 @@ Two Claude backends:
 - Telegram bot token (from @BotFather)
 - Anthropic API key (for spam classification)
 
+### System Dependencies
+
+```bash
+# Build dependencies (for whisper-rs)
+sudo apt-get install libclang-dev cmake
+
+# Audio processing (for voice messages)
+sudo apt-get install ffmpeg
+
+# Python (for TTS)
+sudo apt-get install python3-pip
+```
+
+### Voice Transcription (Whisper)
+
+Download a Whisper model (ggml format):
+
+```bash
+# Recommended: base.en model (~150MB, good balance)
+wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+# Or smaller/larger models:
+# ggml-tiny.en.bin  (~75MB, faster, less accurate)
+# ggml-small.en.bin (~500MB, more accurate)
+```
+
+Add to config:
+```json
+"whisper_model_path": "/path/to/ggml-base.en.bin"
+```
+
+### Text-to-Speech (Fish Speech)
+
+Install and run Fish Speech for voice message output:
+
+```bash
+pip3 install fish-speech
+python3 -m fish_speech.webui --listen 0.0.0.0:8880
+```
+
+Add to config:
+```json
+"tts_endpoint": "http://localhost:8880"
+```
+
 ## Setup
 
 1. Copy the example config:
@@ -62,6 +107,8 @@ Two Claude backends:
    - `anthropic_api_key` - from Anthropic console
    - `owner_ids` - your Telegram user ID(s)
    - `allowed_groups` - group chat IDs to monitor
+   - `whisper_model_path` - path to Whisper model (optional, for voice input)
+   - `tts_endpoint` - Fish Speech URL (optional, for voice output)
 
 3. Build and run:
    ```bash
@@ -75,6 +122,7 @@ Two Claude backends:
 |-------|-------------|
 | `telegram_bot_token` | Bot token from @BotFather |
 | `anthropic_api_key` | Anthropic API key for spam classification |
+| `gemini_api_key` | Gemini API key for image generation |
 | `owner_ids` | User IDs exempt from spam filtering |
 | `allowed_groups` | Group IDs to monitor (empty = disabled) |
 | `trusted_channels` | Channel IDs for forwarded message trust |
@@ -82,20 +130,25 @@ Two Claude backends:
 | `dry_run` | Log actions without executing |
 | `log_chat_id` | Chat ID for log forwarding |
 | `data_dir` | Directory for persistent state |
+| `whisper_model_path` | Path to Whisper model for voice transcription |
+| `tts_endpoint` | Fish Speech API URL for voice output |
 
 ## Bot Capabilities
 
 The chatbot can:
 - `send_message` - send messages to chats
+- `send_photo` - generate and send AI images (Gemini)
+- `send_voice` - send voice messages via TTS (Fish Speech)
 - `add_reaction` - react to messages with emoji
 - `read_messages` - search message history
-- `web_search` - search the web
 - `get_user_info` - look up user details
 - `get_members` - list tracked group members
 - `delete_message` - remove messages (admin)
 - `mute_user` - temporarily mute users (admin)
 - `kick_user` - kick users from group (admin)
 - `ban_user` - permanently ban users (admin)
+
+Voice input is automatically transcribed via Whisper when configured.
 
 ## Security
 

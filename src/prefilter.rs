@@ -51,6 +51,8 @@ mod tests {
             dry_run: false,
             log_chat_id: None,
             data_dir: std::path::PathBuf::from("."),
+            whisper_model_path: None,
+            tts_endpoint: None,
         }
     }
 
