@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claudir Monitor - checks if bot is running and healthy
+# Claudima Monitor - checks if bot is running and healthy
 
 CONFIG="${1:-claudir.json}"
 LOG_DIR="data/prod/logs"
@@ -25,7 +25,7 @@ start_bot() {
     sleep 5
 }
 
-echo "Claudir Monitor started - watching: $CONFIG"
+echo "Claudima Monitor started - watching: $CONFIG"
 echo "Press Ctrl+C to stop"
 
 while true; do

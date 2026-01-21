@@ -1,4 +1,4 @@
-# Claudir
+# Claudima
 
 Telegram bot powered by Claude AI.
 

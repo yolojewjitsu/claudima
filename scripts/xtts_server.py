@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-XTTS TTS Server for Claudir.
+XTTS TTS Server for Claudima.
 
 A simple HTTP server that provides text-to-speech using Coqui XTTS.
 Compatible with the Fish Speech API format for easy migration.

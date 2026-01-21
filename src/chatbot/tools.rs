@@ -346,7 +346,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "import_members".to_string(),
-            description: "Import members from a JSON file (for backfilling from browser extension export). Only Nodir can use this.".to_string(),
+            description: "Import members from a JSON file (for backfilling from browser extension export). Only Dima can use this.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
