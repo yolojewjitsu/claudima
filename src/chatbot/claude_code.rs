@@ -473,7 +473,8 @@ fn worker_loop(
                     }
                 }
                 Err(e) => {
-                    debug!("Parse error: {} ({})", e, &line[..line.len().min(80)]);
+                    let preview: String = line.chars().take(80).collect();
+                    debug!("Parse error: {} ({})", e, preview);
                 }
             }
         }

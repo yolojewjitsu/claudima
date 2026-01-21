@@ -913,7 +913,8 @@ async fn execute_send_voice(
     voice: Option<&str>,
     reply_to_message_id: Option<i64>,
 ) -> Result<Option<String>, String> {
-    info!("🔊 TTS: \"{}\"", &text[..text.len().min(50)]);
+    let preview: String = text.chars().take(50).collect();
+    info!("🔊 TTS: \"{}\"", preview);
 
     let endpoint = config.tts_endpoint.as_ref()
         .ok_or("TTS endpoint not configured")?;
@@ -1184,7 +1185,8 @@ async fn execute_report_bug(
         timestamp, severity, description
     );
 
-    info!("🐛 Bug report ({}): {}", severity, &description[..description.len().min(50)]);
+    let preview: String = description.chars().take(50).collect();
+    info!("🐛 Bug report ({}): {}", severity, preview);
 
     // Append to feedback file
     use std::io::Write;

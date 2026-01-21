@@ -458,7 +458,8 @@ async fn transcribe_voice(bot: &Bot, state: &BotState, msg: &Message) -> Option<
     // Transcribe
     match whisper.transcribe(&data) {
         Ok(text) => {
-            info!("📝 Transcribed: \"{}\"", &text[..text.len().min(100)]);
+            let preview: String = text.chars().take(100).collect();
+            info!("📝 Transcribed: \"{}\"", preview);
             Some(text)
         }
         Err(e) => {

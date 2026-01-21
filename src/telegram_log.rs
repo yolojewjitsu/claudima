@@ -63,7 +63,8 @@ impl TelegramLogLayer {
 
 async fn send_log(bot: &Bot, chat_id: ChatId, text: &str) {
     let text = if text.len() > 4000 {
-        format!("{}...", &text[..4000])
+        let truncated: String = text.chars().take(4000).collect();
+        format!("{}...", truncated)
     } else {
         text.to_string()
     };

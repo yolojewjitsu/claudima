@@ -65,7 +65,8 @@ impl TtsClient {
     /// Returns OGG Opus audio data suitable for Telegram voice messages.
     /// The `voice` parameter specifies the reference voice ID (default: "p231").
     pub async fn synthesize(&self, text: &str, voice: Option<&str>) -> Result<Vec<u8>, String> {
-        info!("TTS: \"{}\"", &text[..text.len().min(50)]);
+        let preview: String = text.chars().take(50).collect();
+        info!("TTS: \"{}\"", preview);
 
         // Default to xtts_female voice (natural sounding female)
         let reference_id = voice.unwrap_or("xtts_female");
