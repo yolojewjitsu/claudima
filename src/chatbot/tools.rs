@@ -31,18 +31,10 @@ pub enum ToolCall {
         username: Option<String>,
     },
 
-    /// Read messages from archive.
-    ReadMessages {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_n: Option<i64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        from_date: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        to_date: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        username: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        limit: Option<i64>,
+    /// Execute a SQL SELECT query on the database.
+    Query {
+        /// SQL SELECT query. Must start with SELECT. Max 100 rows returned.
+        sql: String,
     },
 
     /// Add a reaction emoji to a message.
@@ -241,32 +233,17 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "read_messages".to_string(),
-            description: "Read messages from the archive. Supports date ranges and username filtering.".to_string(),
+            name: "query".to_string(),
+            description: "Execute a SQL SELECT query on the database. Tables: 'messages' (message_id, chat_id, user_id, username, timestamp, text, reply_to_id, reply_to_username, reply_to_text) and 'users' (user_id, username, first_name, join_date, last_message_date, message_count, status). Indexes exist on timestamp, user_id, username. Max 100 rows returned, text truncated to 100 chars.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "last_n": {
-                        "type": "integer",
-                        "description": "Get last N messages (ignores date filters)"
-                    },
-                    "from_date": {
+                    "sql": {
                         "type": "string",
-                        "description": "Messages after this date (e.g. '2024-01-15' or '2024-01-15 10:00')"
-                    },
-                    "to_date": {
-                        "type": "string",
-                        "description": "Messages before this date (e.g. '2024-01-20')"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Filter by username (case-insensitive partial match)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max messages to return (default 50)"
+                        "description": "SQL SELECT query. Only SELECT is allowed. Examples: 'SELECT * FROM messages ORDER BY timestamp DESC LIMIT 10', 'SELECT username, message_count FROM users WHERE status = \"member\" ORDER BY message_count DESC LIMIT 20'"
                     }
-                }
+                },
+                "required": ["sql"]
             }),
         },
         Tool {
@@ -541,7 +518,7 @@ mod tests {
         assert_eq!(tools.len(), 21);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
-        assert_eq!(tools[2].name, "read_messages");
+        assert_eq!(tools[2].name, "query");
         assert_eq!(tools[3].name, "add_reaction");
         assert_eq!(tools[4].name, "delete_message");
         assert_eq!(tools[5].name, "mute_user");

@@ -131,11 +131,42 @@ impl BotState {
     }
 }
 
+/// Parse command-line arguments.
+/// Returns (config_path, system_message)
+fn parse_args() -> (String, Option<String>) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut config_path = "claudir.json".to_string();
+    let mut system_message = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--message" | "-m" => {
+                if i + 1 < args.len() {
+                    system_message = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --message requires an argument");
+                    std::process::exit(1);
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                config_path = arg.to_string();
+                i += 1;
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", args[i]);
+                i += 1;
+            }
+        }
+    }
+
+    (config_path, system_message)
+}
+
 #[tokio::main]
 async fn main() {
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "claudir.json".to_string());
+    let (config_path, system_message) = parse_args();
     let config = Config::load(&config_path);
 
     let bot = Bot::new(&config.telegram_bot_token);
@@ -184,6 +215,23 @@ async fn main() {
     }
 
     let state = Arc::new(BotState::new(config, &bot).await);
+
+    // Send system message to chatbot if provided
+    if let (Some(chatbot), Some(msg)) = (&state.chatbot, &system_message) {
+        info!("📢 Sending system message: {}", msg);
+        let system_msg = ChatMessage {
+            message_id: 0,
+            chat_id: 0,
+            user_id: 0,
+            username: "system".to_string(),
+            timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            text: msg.clone(),
+            reply_to: None,
+            image: None,
+            voice_transcription: None,
+        };
+        chatbot.handle_message(system_msg).await;
+    }
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(handle_new_message))

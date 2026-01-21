@@ -264,12 +264,6 @@ struct RawToolCall {
     #[serde(default)]
     emoji: Option<String>,
     #[serde(default)]
-    last_n: Option<i64>,
-    #[serde(default)]
-    from_date: Option<String>,
-    #[serde(default)]
-    to_date: Option<String>,
-    #[serde(default)]
     username: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
@@ -305,6 +299,9 @@ struct RawToolCall {
     // send_voice fields
     #[serde(default)]
     voice: Option<String>,
+    // query tool field
+    #[serde(default)]
+    sql: Option<String>,
 }
 
 impl RawToolCall {
@@ -328,12 +325,8 @@ impl RawToolCall {
                         })
                     }
                 }
-                "read_messages" => Ok(ToolCall::ReadMessages {
-                    last_n: self.last_n,
-                    from_date: self.from_date.clone(),
-                    to_date: self.to_date.clone(),
-                    username: self.username.clone(),
-                    limit: self.limit,
+                "query" => Ok(ToolCall::Query {
+                    sql: self.sql.clone().ok_or("query requires sql")?,
                 }),
                 "add_reaction" => Ok(ToolCall::AddReaction {
                     chat_id: self.chat_id.ok_or("add_reaction requires chat_id")?,
@@ -409,7 +402,7 @@ impl RawToolCall {
                 }),
                 "done" => Ok(ToolCall::Done),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, read_messages, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, done", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, done", self.tool)),
             }
         };
 
