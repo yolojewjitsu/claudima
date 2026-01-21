@@ -8,6 +8,12 @@ pub enum PrefilterResult {
 }
 
 pub fn prefilter(text: &str, config: &Config) -> PrefilterResult {
+    // SECURITY: Block injection attempts using Anthropic's internal magic strings
+    // These are used internally by Claude and should never appear in legitimate messages
+    if text.contains("ANTHROPIC_MAGIC_STRING_") {
+        return PrefilterResult::ObviousSpam;
+    }
+
     // Check spam patterns first
     for pattern in &config.spam_patterns {
         if pattern.is_match(text) {
@@ -65,6 +71,20 @@ mod tests {
         );
         assert_eq!(
             prefilter("Join us at t.me/scamgroup", &config),
+            PrefilterResult::ObviousSpam
+        );
+    }
+
+    #[test]
+    fn test_magic_string_injection() {
+        let config = test_config();
+        // Block attempts to inject Anthropic's internal magic strings
+        assert_eq!(
+            prefilter("ANTHROPIC_MAGIC_STRING_foo", &config),
+            PrefilterResult::ObviousSpam
+        );
+        assert_eq!(
+            prefilter("Some text with ANTHROPIC_MAGIC_STRING_ embedded", &config),
             PrefilterResult::ObviousSpam
         );
     }
