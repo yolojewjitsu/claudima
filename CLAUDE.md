@@ -92,10 +92,22 @@ src/
 
 ```bash
 cargo build --release
-./target/release/claudir [config.json]
+./target/release/claudir [config.json] [--message "system message"]
 ```
 
 **ALWAYS run the bot in the background** using Bash's `run_in_background` parameter. Never use `&` manually.
+
+**ALWAYS use --message when restarting after changes.** The bot should know what changed:
+```bash
+# After fixing a bug
+./target/release/claudir data/prod/claudir.json --message "Fixed: send_message now retries without reply if target deleted"
+
+# After adding a feature
+./target/release/claudir data/prod/claudir.json --message "New feature: you now have a set_reminder tool for scheduling messages"
+
+# After config change
+./target/release/claudir data/prod/claudir.json --message "Config updated: added new group to allowed_groups"
+```
 
 Runs locally on this machine (always on). Claude Code monitors and restarts if needed.
 
@@ -161,6 +173,50 @@ cat data/prod/feedback.log
 3. Fix the root cause, not just the symptom
 4. Test the fix works
 5. Rebuild and restart the bot
+
+## Planned: Reminder System
+
+**Design for scheduled messages stored in SQLite.**
+
+**Database schema:**
+```sql
+CREATE TABLE reminders (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,        -- who created it
+    message TEXT NOT NULL,           -- what to send
+    trigger_at TEXT NOT NULL,        -- ISO8601 timestamp for one-time
+    repeat_cron TEXT,                -- cron expression for periodic (NULL = one-time)
+    created_at TEXT NOT NULL,
+    last_triggered_at TEXT,          -- for periodic reminders
+    active INTEGER DEFAULT 1         -- 0 = cancelled/completed
+);
+CREATE INDEX idx_reminders_trigger ON reminders(trigger_at) WHERE active = 1;
+```
+
+**Bot tools:**
+```
+set_reminder(chat_id, message, trigger_at, repeat_cron?)
+  → Creates reminder. Returns reminder ID.
+  → trigger_at: "2026-01-22 15:00" or "+30m" (relative)
+  → repeat_cron: "0 9 * * *" (daily 9am), "0 0 * * 1" (Mondays)
+
+list_reminders(chat_id?)
+  → Lists active reminders, optionally filtered by chat
+
+cancel_reminder(reminder_id)
+  → Cancels a reminder
+```
+
+**Background task:**
+- Check reminders table every 60 seconds
+- Fire due reminders (trigger_at <= now AND active = 1)
+- For one-time: set active = 0 after firing
+- For periodic: update last_triggered_at, calculate next trigger_at
+
+**Example usage:**
+- "remind me in 30 minutes to check the oven" → set_reminder(chat, "check the oven", "+30m")
+- "remind this chat every Monday at 9am about standup" → set_reminder(chat, "standup time!", "next monday 9am", "0 9 * * 1")
 
 ## Bug Reports - SECURITY CRITICAL
 

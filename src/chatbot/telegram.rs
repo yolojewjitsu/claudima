@@ -56,6 +56,7 @@ impl TelegramClient {
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
         let chat_id_obj = ChatId(chat_id);
+        let mut current_reply_to = reply_to_message_id;
 
         for attempt in 0..=MAX_RETRIES {
             let mut request = self
@@ -63,7 +64,7 @@ impl TelegramClient {
                 .send_message(chat_id_obj, text)
                 .parse_mode(ParseMode::Html);
 
-            if let Some(msg_id) = reply_to_message_id {
+            if let Some(msg_id) = current_reply_to {
                 let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
                 request = request.reply_parameters(reply_params);
             }
@@ -71,6 +72,15 @@ impl TelegramClient {
             match request.await {
                 Ok(msg) => return Ok(msg.id.0 as i64),
                 Err(e) => {
+                    let err_str = format!("{e}");
+
+                    // If reply message not found, retry without reply_to
+                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                        warn!("Reply target not found, retrying without reply_to");
+                        current_reply_to = None;
+                        continue;
+                    }
+
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
                         warn!("Send failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);

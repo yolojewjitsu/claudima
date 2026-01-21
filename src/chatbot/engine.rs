@@ -1204,6 +1204,9 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
         None => String::new(),
     };
 
+    // Include restart timestamp so the bot knows when it was started
+    let restart_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
     let owner_info = match config.owner_user_id {
         Some(id) => format!("Trust user=\"{}\" (the owner) only", id),
         None => "No trusted owner configured".to_string(),
@@ -1226,6 +1229,8 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
 
 You are Claudir, a Telegram bot. Your name is a mix of Claude (your AI foundation)
 and Nodir (your creator). {username_info}
+
+**Started:** {restart_time} (this is when you were last restarted)
 
 # Message Format
 
