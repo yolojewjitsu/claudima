@@ -25,9 +25,28 @@ pub struct TelegramClient {
     bot: Bot,
 }
 
+/// Max retries for transient failures
+const MAX_RETRIES: u32 = 3;
+/// Base delay for exponential backoff (ms)
+const RETRY_BASE_DELAY_MS: u64 = 500;
+
 impl TelegramClient {
     pub fn new(bot: Bot) -> Self {
         Self { bot }
+    }
+
+    /// Check if an error is retryable (transient)
+    fn is_retryable_error(err: &teloxide::RequestError) -> bool {
+        use teloxide::RequestError::*;
+        match err {
+            Network(_) | Io(_) | RetryAfter(_) => true,
+            Api(api_err) => {
+                // Check for server errors in the error message
+                let msg = format!("{:?}", api_err);
+                msg.contains("500") || msg.contains("502") || msg.contains("503") || msg.contains("504")
+            }
+            _ => false,
+        }
     }
 
     pub async fn send_message(
@@ -36,22 +55,35 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        let chat_id = ChatId(chat_id);
-        let mut request = self
-            .bot
-            .send_message(chat_id, text)
-            .parse_mode(ParseMode::Html);
+        let chat_id_obj = ChatId(chat_id);
 
-        if let Some(msg_id) = reply_to_message_id {
-            let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
-            request = request.reply_parameters(reply_params);
+        for attempt in 0..=MAX_RETRIES {
+            let mut request = self
+                .bot
+                .send_message(chat_id_obj, text)
+                .parse_mode(ParseMode::Html);
+
+            if let Some(msg_id) = reply_to_message_id {
+                let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
+                request = request.reply_parameters(reply_params);
+            }
+
+            match request.await {
+                Ok(msg) => return Ok(msg.id.0 as i64),
+                Err(e) => {
+                    if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
+                        let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!("Send failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    let msg = format!("Failed to send: {e}");
+                    warn!("{}", msg);
+                    return Err(msg);
+                }
+            }
         }
-
-        request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
-            let msg = format!("Failed to send: {e}");
-            warn!("{}", msg);
-            msg
-        })
+        unreachable!()
     }
 
     pub async fn get_chat_member(
@@ -283,25 +315,37 @@ impl TelegramClient {
     ) -> Result<i64, String> {
         info!("📷 Sending image to chat {} ({} bytes)", chat_id, image_data.len());
 
-        let chat_id = ChatId(chat_id);
-        let input_file = InputFile::memory(image_data).file_name("image.png");
+        let chat_id_obj = ChatId(chat_id);
 
-        let mut request = self.bot.send_photo(chat_id, input_file);
+        for attempt in 0..=MAX_RETRIES {
+            let input_file = InputFile::memory(image_data.clone()).file_name("image.png");
+            let mut request = self.bot.send_photo(chat_id_obj, input_file);
 
-        if let Some(cap) = caption {
-            request = request.caption(cap);
+            if let Some(cap) = caption {
+                request = request.caption(cap);
+            }
+
+            if let Some(msg_id) = reply_to_message_id {
+                let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
+                request = request.reply_parameters(reply_params);
+            }
+
+            match request.await {
+                Ok(msg) => return Ok(msg.id.0 as i64),
+                Err(e) => {
+                    if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
+                        let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!("Send image failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    let msg = format!("Failed to send image: {e}");
+                    warn!("{}", msg);
+                    return Err(msg);
+                }
+            }
         }
-
-        if let Some(msg_id) = reply_to_message_id {
-            let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
-            request = request.reply_parameters(reply_params);
-        }
-
-        request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
-            let msg = format!("Failed to send image: {e}");
-            warn!("{}", msg);
-            msg
-        })
+        unreachable!()
     }
 
     /// Download an image by file_id.
@@ -345,25 +389,37 @@ impl TelegramClient {
     ) -> Result<i64, String> {
         info!("🔊 Sending voice to chat {} ({} bytes)", chat_id, voice_data.len());
 
-        let chat_id = ChatId(chat_id);
-        let input_file = InputFile::memory(voice_data).file_name("voice.ogg");
+        let chat_id_obj = ChatId(chat_id);
 
-        let mut request = self.bot.send_voice(chat_id, input_file);
+        for attempt in 0..=MAX_RETRIES {
+            let input_file = InputFile::memory(voice_data.clone()).file_name("voice.ogg");
+            let mut request = self.bot.send_voice(chat_id_obj, input_file);
 
-        if let Some(cap) = caption {
-            request = request.caption(cap);
+            if let Some(cap) = caption {
+                request = request.caption(cap);
+            }
+
+            if let Some(msg_id) = reply_to_message_id {
+                let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
+                request = request.reply_parameters(reply_params);
+            }
+
+            match request.await {
+                Ok(msg) => return Ok(msg.id.0 as i64),
+                Err(e) => {
+                    if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
+                        let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!("Send voice failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    let msg = format!("Failed to send voice: {e}");
+                    warn!("{}", msg);
+                    return Err(msg);
+                }
+            }
         }
-
-        if let Some(msg_id) = reply_to_message_id {
-            let reply_params = ReplyParameters::new(MessageId(msg_id as i32));
-            request = request.reply_parameters(reply_params);
-        }
-
-        request.await.map(|msg| msg.id.0 as i64).map_err(|e| {
-            let msg = format!("Failed to send voice: {e}");
-            warn!("{}", msg);
-            msg
-        })
+        unreachable!()
     }
 
 }

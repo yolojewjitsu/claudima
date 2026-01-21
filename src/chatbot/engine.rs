@@ -589,7 +589,8 @@ async fn execute_send_message(
     text: &str,
     reply_to_message_id: Option<i64>,
 ) -> Result<Option<String>, String> {
-    info!("📤 Sending to {}: \"{}\"", chat_id, &text[..text.len().min(50)]);
+    let preview: String = text.chars().take(50).collect();
+    info!("📤 Sending to {}: \"{}\"", chat_id, preview);
 
     // Validate reply target
     let validated_reply = if let Some(reply_id) = reply_to_message_id {
@@ -609,6 +610,7 @@ async fn execute_send_message(
     };
 
     let msg_id = telegram.send_message(chat_id, text, validated_reply).await?;
+    info!("✅ Sent message {} to chat {}", msg_id, chat_id);
 
     // Build reply info
     let reply_to = if let Some(reply_id) = validated_reply {
