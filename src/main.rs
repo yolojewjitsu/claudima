@@ -318,11 +318,77 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         return Ok(());
     }
 
-    // Pass to chatbot
+    // SPAM FILTER FIRST - spam messages must NEVER reach the chatbot
+    let is_spam = if let Some(text) = text {
+        // Owners and trusted channels bypass spam filter
+        let bypass_filter = state.config.is_owner(user.id)
+            || msg.sender_chat.as_ref().map_or(false, |c| state.config.is_trusted_channel(c.id));
+
+        if bypass_filter {
+            info!("Bypass spam filter for {username} ({})", user.id);
+            false
+        } else {
+            let prefilter_result = prefilter(text, &state.config);
+            let text_preview: String = text.chars().take(100).collect();
+            info!("Message from {username} ({}): \"{text_preview}\" → {:?}", user.id, prefilter_result);
+
+            match prefilter_result {
+                PrefilterResult::ObviousSpam => true,
+                PrefilterResult::ObviousSafe => false,
+                PrefilterResult::Ambiguous => {
+                    match classify(text, &state.claude).await {
+                        Ok(Classification::Spam) => {
+                            info!("Haiku: spam");
+                            true
+                        }
+                        Ok(Classification::NotSpam) => {
+                            info!("Haiku: not spam");
+                            false
+                        }
+                        Err(e) => {
+                            warn!("Classification error: {e}");
+                            false
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        false // No text = not spam (image/voice only)
+    };
+
+    // Handle spam: delete, strike, ban - and DO NOT pass to chatbot
+    if is_spam {
+        let dry = state.config.dry_run;
+
+        if dry {
+            info!("[DRY RUN] Would delete message {}", msg.id);
+        } else if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
+            warn!("Failed to delete: {e}");
+        }
+
+        let strikes = state.add_strike(user.id).await;
+        info!("{username} has {strikes} strike(s)");
+
+        if strikes >= state.config.max_strikes {
+            if dry {
+                info!("[DRY RUN] Would ban {username}");
+            } else {
+                info!("Banning {username}");
+                if let Err(e) = bot.ban_chat_member(msg.chat.id, user.id).await {
+                    warn!("Failed to ban: {e}");
+                }
+            }
+        }
+
+        // CRITICAL: Do not pass spam to chatbot
+        return Ok(());
+    }
+
+    // Only non-spam messages reach the chatbot
     if let Some(ref chatbot) = state.chatbot {
         // Download image if present
         let image = if has_image {
-            // Get largest image size
             if let Some(photos) = msg.photo() {
                 if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
                     match chatbot.download_image(&largest.file.id.0).await {
@@ -347,75 +413,6 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
 
         let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription);
         chatbot.handle_message(chat_msg).await;
-    }
-
-    let text = match text {
-        Some(t) => t,
-        None => return Ok(()), // Image-only messages skip spam filtering
-    };
-
-    // Skip spam filter for owners
-    if state.config.is_owner(user.id) {
-        info!("Skip spam filter for owner {username} ({})", user.id);
-        return Ok(());
-    }
-
-    // Skip spam filter for trusted channels
-    if let Some(ref sender_chat) = msg.sender_chat
-        && state.config.is_trusted_channel(sender_chat.id)
-    {
-        info!("Skip spam filter for trusted channel {}", sender_chat.id);
-        return Ok(());
-    }
-
-    // Spam filtering
-    let prefilter_result = prefilter(text, &state.config);
-    let text_preview: String = text.chars().take(100).collect();
-    info!("Message from {username} ({}): \"{text_preview}\" → {:?}", user.id, prefilter_result);
-
-    let is_spam = match prefilter_result {
-        PrefilterResult::ObviousSpam => true,
-        PrefilterResult::ObviousSafe => false,
-        PrefilterResult::Ambiguous => {
-            match classify(text, &state.claude).await {
-                Ok(Classification::Spam) => {
-                    info!("Haiku: spam");
-                    true
-                }
-                Ok(Classification::NotSpam) => {
-                    info!("Haiku: not spam");
-                    false
-                }
-                Err(e) => {
-                    warn!("Classification error: {e}");
-                    false
-                }
-            }
-        }
-    };
-
-    if is_spam {
-        let dry = state.config.dry_run;
-
-        if dry {
-            info!("[DRY RUN] Would delete message {}", msg.id);
-        } else if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
-            warn!("Failed to delete: {e}");
-        }
-
-        let strikes = state.add_strike(user.id).await;
-        info!("{username} has {strikes} strike(s)");
-
-        if strikes >= state.config.max_strikes {
-            if dry {
-                info!("[DRY RUN] Would ban {username}");
-            } else {
-                info!("Banning {username}");
-                if let Err(e) = bot.ban_chat_member(msg.chat.id, user.id).await {
-                    warn!("Failed to ban: {e}");
-                }
-            }
-        }
     }
 
     Ok(())
