@@ -357,8 +357,9 @@ impl Database {
                         rusqlite::types::Value::Integer(i) => i.to_string(),
                         rusqlite::types::Value::Real(f) => f.to_string(),
                         rusqlite::types::Value::Text(s) => {
-                            if s.len() > 100 {
-                                format!("{}...", &s[..100])
+                            // Use chars() to respect UTF-8 character boundaries
+                            if s.chars().count() > 100 {
+                                format!("{}...", s.chars().take(100).collect::<String>())
                             } else {
                                 s
                             }
