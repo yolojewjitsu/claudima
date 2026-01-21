@@ -81,19 +81,22 @@ Add to config:
 "whisper_model_path": "/path/to/ggml-base.en.bin"
 ```
 
-### Text-to-Speech (Fish Speech)
+### Text-to-Speech (XTTS)
 
-Install and run Fish Speech for voice message output:
+Install Coqui TTS and run the XTTS server for voice message output:
 
 ```bash
-pip3 install fish-speech
-python3 -m fish_speech.webui --listen 0.0.0.0:8880
+pip3 install TTS flask
+python3 scripts/xtts_server.py --port 8880 --voices-dir data/voices
 ```
 
 Add to config:
 ```json
 "tts_endpoint": "http://localhost:8880"
 ```
+
+Voice cloning: place `.wav` reference files in `data/voices/` (e.g., `myvoice.wav`).
+Then use `reference_id: "myvoice"` in TTS requests.
 
 ## Setup
 
@@ -108,7 +111,7 @@ Add to config:
    - `owner_ids` - your Telegram user ID(s)
    - `allowed_groups` - group chat IDs to monitor
    - `whisper_model_path` - path to Whisper model (optional, for voice input)
-   - `tts_endpoint` - Fish Speech URL (optional, for voice output)
+   - `tts_endpoint` - XTTS URL (optional, for voice output)
 
 3. Build and run:
    ```bash
@@ -131,14 +134,14 @@ Add to config:
 | `log_chat_id` | Chat ID for log forwarding |
 | `data_dir` | Directory for persistent state |
 | `whisper_model_path` | Path to Whisper model for voice transcription |
-| `tts_endpoint` | Fish Speech API URL for voice output |
+| `tts_endpoint` | XTTS API URL for voice output |
 
 ## Bot Capabilities
 
 The chatbot can:
 - `send_message` - send messages to chats
 - `send_photo` - generate and send AI images (Gemini)
-- `send_voice` - send voice messages via TTS (Fish Speech)
+- `send_voice` - send voice messages via TTS (XTTS)
 - `add_reaction` - react to messages with emoji
 - `read_messages` - search message history
 - `get_user_info` - look up user details

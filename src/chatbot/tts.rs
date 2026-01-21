@@ -1,7 +1,7 @@
-//! Text-to-speech using Fish Speech.
+//! Text-to-speech using XTTS.
 //!
-//! Generates voice audio from text using the Fish Speech model.
-//! Requires a running Fish Speech API server.
+//! Generates voice audio from text using Coqui XTTS v2.
+//! Requires running the XTTS server: `python scripts/xtts_server.py`
 
 use std::process::Command;
 
@@ -15,7 +15,7 @@ struct ListReferencesResponse {
     reference_ids: Vec<String>,
 }
 
-/// TTS client for Fish Speech API.
+/// TTS client for XTTS server.
 pub struct TtsClient {
     endpoint: String,
     client: reqwest::Client,
@@ -24,7 +24,7 @@ pub struct TtsClient {
 impl TtsClient {
     /// Create a new TTS client.
     ///
-    /// `endpoint` should be the base URL of the Fish Speech server,
+    /// `endpoint` should be the base URL of the XTTS server,
     /// e.g., "http://localhost:8880"
     pub fn new(endpoint: String) -> Self {
         Self {
@@ -68,10 +68,10 @@ impl TtsClient {
         let preview: String = text.chars().take(50).collect();
         info!("TTS: \"{}\"", preview);
 
-        // Default to xtts_female voice (natural sounding female)
-        let reference_id = voice.unwrap_or("xtts_female");
+        // Default voice (uses XTTS built-in "Ana Florence" if no reference)
+        let reference_id = voice.unwrap_or("default");
 
-        // Call Fish Speech TTS endpoint
+        // Call XTTS server endpoint
         let response = self
             .client
             .post(format!("{}/v1/tts", self.endpoint))
