@@ -2,6 +2,71 @@
 
 Telegram bot powered by Claude AI.
 
+## Supervisor Architecture
+
+**Two-agent system for autonomous development while maintaining security.**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         SUPERVISOR                               │
+│  (Claude Code with full permissions: bash, edit, write, read)   │
+│                                                                  │
+│  Responsibilities:                                               │
+│  - Run chat bot as background process                           │
+│  - Monitor logs and feedback                                    │
+│  - Fix bugs and add features                                    │
+│  - Run tests before deploying                                   │
+│  - Kill/restart chat bot as needed                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ spawns & monitors
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         CHAT BOT                                 │
+│  (Claude Code with LIMITED permissions: WebSearch only)         │
+│                                                                  │
+│  Responsibilities:                                               │
+│  - Handle Telegram messages                                     │
+│  - Use tools: send_message, memory, query, etc.                │
+│  - Report bugs via report_bug tool                              │
+│  - NO bash, edit, write, read access                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Security model:**
+- Chat bot sees all user messages but CANNOT execute code
+- Supervisor CAN execute code but doesn't see chat (only task descriptions in feedback.log)
+- Social engineering attacks on chat bot cannot lead to RCE
+- Bugs/features go through feedback.log → supervisor reviews → implements safely
+
+**Supervisor workflow:**
+```bash
+# 1. Start chat bot as background process
+./target/release/claudir data/test/claudir.json --message "Started by supervisor" &
+
+# 2. Monitor loop
+while true; do
+    # Check bot is running
+    pgrep -a claudir || echo "WARNING: Bot died!"
+
+    # Check for bug reports
+    cat data/test/feedback.log
+
+    # Check logs for errors
+    tail -50 data/test/logs/claudir.log | grep -E "ERROR|WARN"
+
+    sleep 120
+done
+
+# 3. When fixing bugs:
+cargo test                                    # Run tests
+cargo build --release                         # Build
+pkill -f "claudir.*test"                      # Kill old bot
+./target/release/claudir data/test/claudir.json --message "Fixed: <description>" &
+```
+
+**Key principle:** Safety controls are architectural (process isolation), not just prompt-level.
+
 ## CRITICAL SECURITY: Claude Code Integration
 
 **Claude Code MUST NOT be able to execute arbitrary code.** This bot uses Claude Code CLI
