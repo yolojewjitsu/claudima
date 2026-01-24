@@ -1,7 +1,7 @@
 /target
 /logs
-claudir.json
-claudir-test.json
+claudima.json
+claudima-test.json
 
 # Data directories (runtime state - never commit)
 data/

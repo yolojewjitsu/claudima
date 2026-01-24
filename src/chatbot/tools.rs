@@ -182,6 +182,15 @@ pub enum ToolCall {
         severity: Option<String>,
     },
 
+    /// Get YouTube video metadata from a URL.
+    YoutubeInfo {
+        /// YouTube URL (e.g. https://www.youtube.com/watch?v=xyz or https://youtu.be/xyz)
+        url: String,
+    },
+
+    /// Do nothing - acknowledge a message without taking action.
+    Noop,
+
     /// Signal that processing is complete.
     Done,
 
@@ -466,6 +475,25 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "youtube_info".to_string(),
+            description: "Get metadata about a YouTube video (title, author, thumbnail). Works with youtube.com and youtu.be URLs.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "YouTube video URL (e.g. https://www.youtube.com/watch?v=xyz or https://youtu.be/xyz)" }
+                },
+                "required": ["url"]
+            }),
+        },
+        Tool {
+            name: "noop".to_string(),
+            description: "Do nothing - use this to acknowledge a system message or notification without taking any action.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
             parameters: serde_json::json!({
@@ -515,7 +543,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 23);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "query");
@@ -536,6 +564,8 @@ mod tests {
         assert_eq!(tools[17].name, "search_memories");
         assert_eq!(tools[18].name, "delete_memory");
         assert_eq!(tools[19].name, "report_bug");
-        assert_eq!(tools[20].name, "done");
+        assert_eq!(tools[20].name, "youtube_info");
+        assert_eq!(tools[21].name, "noop");
+        assert_eq!(tools[22].name, "done");
     }
 }

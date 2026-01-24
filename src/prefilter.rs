@@ -44,7 +44,7 @@ mod tests {
         Config {
             owner_ids: std::collections::HashSet::from([teloxide::types::UserId(1)]),
             telegram_bot_token: String::new(),
-            anthropic_api_key: String::new(),
+            openrouter_api_key: String::new(),
             gemini_api_key: String::new(),
             allowed_groups: std::collections::HashSet::new(),
             trusted_channels: std::collections::HashSet::new(),

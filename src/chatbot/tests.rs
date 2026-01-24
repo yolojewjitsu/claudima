@@ -653,7 +653,7 @@ mod integration {
 
         let mut bot = TestBot::new(mock_tg, mock_claude);
 
-        bot.simulate_message(100, "alice", "hey claudir, what do you think?");
+        bot.simulate_message(100, "alice", "hey claudima, what do you think?");
         bot.process();
         bot.advance_debounce();
         bot.process();
@@ -763,7 +763,7 @@ mod e2e_scenarios {
         let mut bot = TestBot::new(mock_tg, mock_claude);
 
         bot.simulate_message_with_id(1, 100, "alice", "hey everyone");
-        bot.simulate_message_with_id(2, 101, "bob", "claudir what do you think about rust?");
+        bot.simulate_message_with_id(2, 101, "bob", "claudima what do you think about rust?");
 
         bot.process_all();
 

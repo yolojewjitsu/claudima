@@ -45,7 +45,7 @@ async def main():
     print(f"Connecting to Telegram...")
 
     # Session file stores auth, so you only need to auth once
-    client = TelegramClient('claudir_export', int(API_ID), API_HASH)
+    client = TelegramClient('claudima_export', int(API_ID), API_HASH)
     await client.start()
 
     print(f"Fetching messages from chat {chat_id}...")

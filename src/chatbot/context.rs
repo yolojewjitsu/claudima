@@ -132,6 +132,7 @@ mod tests {
             reply_to: None,
             image: None,
             voice_transcription: None,
+            documents: vec![],
         }
     }
 

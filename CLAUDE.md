@@ -42,18 +42,18 @@ Telegram bot powered by Claude AI.
 **Supervisor workflow:**
 ```bash
 # 1. Start chat bot as background process
-./target/release/claudir data/test/claudir.json --message "Started by supervisor" &
+./target/release/claudima data/test/claudima.json --message "Started by supervisor" &
 
 # 2. Monitor loop
 while true; do
     # Check bot is running
-    pgrep -a claudir || echo "WARNING: Bot died!"
+    pgrep -a claudima || echo "WARNING: Bot died!"
 
     # Check for bug reports
     cat data/test/feedback.log
 
     # Check logs for errors
-    tail -50 data/test/logs/claudir.log | grep -E "ERROR|WARN"
+    tail -50 data/test/logs/claudima.log | grep -E "ERROR|WARN"
 
     sleep 120
 done
@@ -61,8 +61,8 @@ done
 # 3. When fixing bugs:
 cargo test                                    # Run tests
 cargo build --release                         # Build
-pkill -f "claudir.*test"                      # Kill old bot
-./target/release/claudir data/test/claudir.json --message "Fixed: <description>" &
+pkill -f "claudima.*test"                      # Kill old bot
+./target/release/claudima data/test/claudima.json --message "Fixed: <description>" &
 ```
 
 **Key principle:** Safety controls are architectural (process isolation), not just prompt-level.
@@ -81,8 +81,8 @@ similar tools, any malicious prompt from Telegram users becomes **Remote Code Ex
 
 **Testing:**
 - ALWAYS use `data/test/` config for development, NEVER `data/prod/`
-- Test config: `data/test/claudir.json`
-- Prod config: `data/prod/claudir.json`
+- Test config: `data/test/claudima.json`
+- Prod config: `data/prod/claudima.json`
 
 ## Code Quality Standards
 
@@ -144,7 +144,7 @@ src/
 
 ## Config
 
-`claudir.json`:
+`claudima.json`:
 - `telegram_bot_token` - Bot token from @BotFather
 - `anthropic_api_key` - Claude API key
 - `owner_ids` - User IDs exempt from filtering
@@ -157,7 +157,7 @@ src/
 
 ```bash
 cargo build --release
-./target/release/claudir [config.json] [--message "system message"]
+./target/release/claudima [config.json] [--message "system message"]
 ```
 
 **ALWAYS run the bot in the background** using Bash's `run_in_background` parameter. Never use `&` manually.
@@ -165,20 +165,20 @@ cargo build --release
 **ALWAYS use --message when restarting after changes.** The bot should know what changed:
 ```bash
 # After fixing a bug
-./target/release/claudir data/prod/claudir.json --message "Fixed: send_message now retries without reply if target deleted"
+./target/release/claudima data/prod/claudima.json --message "Fixed: send_message now retries without reply if target deleted"
 
 # After adding a feature
-./target/release/claudir data/prod/claudir.json --message "New feature: you now have a set_reminder tool for scheduling messages"
+./target/release/claudima data/prod/claudima.json --message "New feature: you now have a set_reminder tool for scheduling messages"
 
 # After config change
-./target/release/claudir data/prod/claudir.json --message "Config updated: added new group to allowed_groups"
+./target/release/claudima data/prod/claudima.json --message "Config updated: added new group to allowed_groups"
 ```
 
 Runs locally on this machine (always on). Claude Code monitors and restarts if needed.
 
 ## Logs
 
-All logs go to `logs/claudir.log` - a single persistent file across all runs. Check this file for:
+All logs go to `logs/claudima.log` - a single persistent file across all runs. Check this file for:
 - Complete conversation history
 - Error messages and warnings
 - Bot activity and state
@@ -197,8 +197,8 @@ while true; do
     # The script outputs the new reports before exiting
 
     # Also check logs and bot health
-    tail -50 data/prod/logs/claudir.log
-    pgrep -a claudir || echo "WARNING: Bot not running!"
+    tail -50 data/prod/logs/claudima.log
+    pgrep -a claudima || echo "WARNING: Bot not running!"
 
     # Sleep before next iteration if no bug reports
     sleep 120
@@ -208,7 +208,7 @@ done
 Or simply check periodically:
 ```bash
 # Quick health check
-pgrep -a claudir && tail -20 data/prod/logs/claudir.log
+pgrep -a claudima && tail -20 data/prod/logs/claudima.log
 
 # Check for new bug reports
 cat data/prod/feedback.log
@@ -218,7 +218,7 @@ cat data/prod/feedback.log
 
 **You are an intelligent observability system when not writing code.**
 
-1. **Periodically check logs**: Use `tail -100 data/prod/logs/claudir.log` to review recent activity
+1. **Periodically check logs**: Use `tail -100 data/prod/logs/claudima.log` to review recent activity
 2. **Check bug reports**: Read `data/prod/feedback.log` for bot-reported issues
 3. **Proactively fix issues**: Don't wait to be asked - if you see errors, investigate and fix them
 4. **Never let the bot get stuck**: If you see long gaps in activity or hanging operations, investigate

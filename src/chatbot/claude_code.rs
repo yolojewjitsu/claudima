@@ -571,6 +571,7 @@ fn spawn_process(resume_session: Option<&str>) -> Result<Child, String> {
         "--verbose",
         "--model", "opus",
         "--tools", "WebSearch",  // SECURITY: only allow read-only web search
+        "--allowedTools", "WebSearch",  // Auto-approve WebSearch usage
         "--json-schema", &schema_str,
     ]);
 

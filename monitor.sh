@@ -1,9 +1,9 @@
 #!/bin/bash
 # Claudima Monitor - checks if bot is running and healthy
 
-CONFIG="${1:-claudir.json}"
+CONFIG="${1:-claudima.json}"
 LOG_DIR="data/prod/logs"
-BOT_CMD="./target/release/claudir $CONFIG"
+BOT_CMD="./target/release/claudima $CONFIG"
 
 check_process() {
     pgrep -f "$BOT_CMD" > /dev/null
@@ -11,7 +11,7 @@ check_process() {
 
 check_recent_activity() {
     # Check if log file was modified in last 5 minutes
-    LOG_FILE="$LOG_DIR/claudir.log"
+    LOG_FILE="$LOG_DIR/claudima.log"
     if [ -f "$LOG_FILE" ]; then
         find "$LOG_FILE" -mmin -5 | grep -q .
         return $?
@@ -20,8 +20,8 @@ check_recent_activity() {
 }
 
 start_bot() {
-    echo "$(date): Starting claudir..."
-    nohup $BOT_CMD >> /tmp/claudir-monitor.log 2>&1 &
+    echo "$(date): Starting claudima..."
+    nohup $BOT_CMD >> /tmp/claudima-monitor.log 2>&1 &
     sleep 5
 }
 

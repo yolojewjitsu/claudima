@@ -73,10 +73,12 @@ pub struct GeneratedImage {
 
 impl GeminiClient {
     pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self { api_key, client }
     }
 
     /// Generate an image from a text prompt.

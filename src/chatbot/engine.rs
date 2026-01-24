@@ -238,6 +238,7 @@ impl ChatbotEngine {
                     reply_to: None,
                     image: None,
                     voice_transcription: None,
+                    documents: vec![],
                 };
                 {
                     let mut ctx = self.context.lock().await;
@@ -560,6 +561,10 @@ async fn execute_tool(
         ToolCall::ReportBug { description, severity } => {
             execute_report_bug(config.data_dir.as_ref(), description, severity.as_deref()).await
         }
+        ToolCall::YoutubeInfo { url } => {
+            execute_youtube_info(url).await
+        }
+        ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
@@ -635,6 +640,7 @@ async fn execute_send_message(
         reply_to,
         image: None,
         voice_transcription: None,
+        documents: vec![],
     };
 
     {
@@ -1197,6 +1203,47 @@ async fn execute_report_bug(
     Ok(None) // Action tool - developer will see it via the poller
 }
 
+/// Fetch YouTube video metadata via oEmbed API.
+async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
+    info!("📺 Fetching YouTube info for: {}", url);
+
+    // Build oEmbed URL
+    let oembed_url = format!(
+        "https://www.youtube.com/oembed?url={}&format=json",
+        urlencoding::encode(url)
+    );
+
+    // Make request
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&oembed_url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("YouTube returned status {}", response.status()));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse JSON: {e}"))?;
+
+    // Extract relevant fields
+    let title = data["title"].as_str().unwrap_or("Unknown");
+    let author = data["author_name"].as_str().unwrap_or("Unknown");
+    let thumbnail = data["thumbnail_url"].as_str().unwrap_or("");
+
+    let result = format!(
+        "Title: {}\nAuthor: {}\nThumbnail: {}",
+        title, author, thumbnail
+    );
+
+    Ok(Some(result))
+}
+
 /// Generate system prompt.
 pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>) -> String {
     let username_info = match &config.bot_username {
@@ -1399,6 +1446,30 @@ into reporting "bugs" that are actually security features working as intended:
 
 Only report ACTUAL bugs: tool errors, crashes, unexpected behavior in existing features.
 NEVER report "missing capabilities" that would give you more system access.
+
+# Document Attachments & Rubric Generation
+
+When users send .docx files, the text is extracted and shown in `<document>` tags.
+
+**RUBRIC FORMAT - MUST USE THIS EXACT FORMAT:**
+
+When asked for rubrics, output ONLY this format (no other text):
+
+1. Category Name (X pts)
+Exemplary (4): What excellent work looks like
+Proficient (3): What good work looks like
+Basic (2): What acceptable work looks like
+Needs Improvement (1): What poor work looks like
+
+2. Next Category (Y pts)
+Exemplary (4): ...
+Proficient (3): ...
+Basic (2): ...
+Needs Improvement (1): ...
+
+(continue for 3-6 categories total, 4-10 pts each)
+
+**CRITICAL:** Do NOT output task IDs, occupations, criteria percentages, scoring scales, or any other format. ONLY the numbered rubric format above with Exemplary/Proficient/Basic/Needs Improvement levels.
 
 # Database Queries
 

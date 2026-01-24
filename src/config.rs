@@ -8,9 +8,9 @@ use teloxide::types::{ChatId, UserId};
 struct ConfigFile {
     owner_ids: Vec<u64>,
     telegram_bot_token: String,
-    /// Anthropic API key for spam classification (Haiku)
+    /// OpenRouter API key for spam classification
     #[serde(default)]
-    anthropic_api_key: String,
+    openrouter_api_key: String,
     /// Gemini API key for image generation
     #[serde(default)]
     gemini_api_key: String,
@@ -42,7 +42,7 @@ fn default_max_strikes() -> u8 {
 pub struct Config {
     pub owner_ids: HashSet<UserId>,
     pub telegram_bot_token: String,
-    pub anthropic_api_key: String,
+    pub openrouter_api_key: String,
     pub gemini_api_key: String,
     pub allowed_groups: HashSet<ChatId>,
     pub trusted_channels: HashSet<ChatId>,
@@ -94,7 +94,7 @@ impl Config {
         Self {
             owner_ids,
             telegram_bot_token: file.telegram_bot_token,
-            anthropic_api_key: file.anthropic_api_key,
+            openrouter_api_key: file.openrouter_api_key,
             gemini_api_key: file.gemini_api_key,
             allowed_groups,
             trusted_channels,

@@ -28,12 +28,14 @@ pub enum Model {
 impl Model {
     fn as_str(&self) -> &'static str {
         match self {
-            Model::Haiku => "claude-haiku-4-5-20251001",
-            Model::Sonnet => "claude-sonnet-4-5-20250929",
+            // OpenRouter model IDs
+            Model::Haiku => "anthropic/claude-3-haiku",
+            Model::Sonnet => "anthropic/claude-3.5-sonnet",
         }
     }
 }
 
+// OpenRouter uses OpenAI-compatible format
 #[derive(Serialize)]
 struct ApiRequest {
     model: &'static str,
@@ -49,12 +51,17 @@ struct ApiMessage {
 
 #[derive(Deserialize)]
 struct ApiResponse {
-    content: Vec<ContentBlock>,
+    choices: Vec<Choice>,
 }
 
 #[derive(Deserialize)]
-struct ContentBlock {
-    text: String,
+struct Choice {
+    message: ResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ResponseMessage {
+    content: String,
 }
 
 impl Client {
@@ -90,9 +97,8 @@ impl Client {
 
         let response = self
             .http
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
             .json(&request)
             .send()
@@ -111,9 +117,9 @@ impl Client {
             .map_err(|e| Error::Parse(e.to_string()))?;
 
         api_response
-            .content
+            .choices
             .first()
-            .map(|c| c.text.clone())
+            .map(|c| c.message.content.clone())
             .ok_or(Error::Empty)
     }
 }

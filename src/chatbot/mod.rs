@@ -4,6 +4,7 @@ pub mod claude_code;
 pub mod context;
 pub mod database;
 pub mod debounce;
+pub mod docx;
 pub mod engine;
 pub mod gemini;
 pub mod message;

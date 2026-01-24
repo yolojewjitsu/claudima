@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, Whisper};
+use chatbot::message::DocumentContent;
 use classifier::{classify, Classification};
 use claude::Client as ClaudeClient;
 use config::Config;
@@ -31,7 +32,7 @@ struct BotState {
 
 impl BotState {
     async fn new(config: Config, bot: &Bot) -> Self {
-        let claude = ClaudeClient::new(config.anthropic_api_key.clone());
+        let claude = ClaudeClient::new(config.openrouter_api_key.clone());
 
         // Get bot info
         let (bot_user_id, bot_username) = match bot.get_me().await {
@@ -135,7 +136,7 @@ impl BotState {
 /// Returns (config_path, system_message)
 fn parse_args() -> (String, Option<String>) {
     let args: Vec<String> = std::env::args().collect();
-    let mut config_path = "claudir.json".to_string();
+    let mut config_path = "claudima.json".to_string();
     let mut system_message = None;
 
     let mut i = 1;
@@ -177,7 +178,7 @@ async fn main() {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("claudir.log"))
+        .open(log_dir.join("claudima.log"))
         .expect("Failed to open log file");
     let (non_blocking, _guard) = tracing_appender::non_blocking(log_file);
 
@@ -207,7 +208,7 @@ async fn main() {
         registry.init();
     }
 
-    info!("🚀 Starting claudir...");
+    info!("🚀 Starting claudima...");
     info!("Loaded config from {config_path}");
     info!("Owner IDs: {:?}", config.owner_ids);
     if config.dry_run {
@@ -228,6 +229,7 @@ async fn main() {
             text: msg.clone(),
             reply_to: None,
             image: None,
+            documents: vec![],
             voice_transcription: None,
         };
         chatbot.handle_message(system_msg).await;
@@ -282,7 +284,10 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
                 // Transcribe voice if present
                 let voice_transcription = transcribe_voice(&bot, &state, &msg).await;
 
-                let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription);
+                // Extract documents if present
+                let documents = extract_documents(&bot, &msg).await;
+
+                let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription, documents);
                 chatbot.handle_message(chat_msg).await;
             }
             return Ok(());
@@ -308,13 +313,16 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         return Ok(());
     }
 
-    // Get text (or caption for images/voice)
+    // Get text (or caption for images/voice/documents)
     let text = msg.text().or_else(|| msg.caption());
     let has_image = msg.photo().is_some();
     let has_voice = msg.voice().is_some();
+    let has_document = msg.document().map_or(false, |d| {
+        d.file_name.as_deref().map_or(false, |f| f.to_lowercase().ends_with(".docx"))
+    });
 
-    // Skip if no text, image, or voice
-    if text.is_none() && !has_image && !has_voice {
+    // Skip if no text, image, voice, or document
+    if text.is_none() && !has_image && !has_voice && !has_document {
         return Ok(());
     }
 
@@ -411,7 +419,10 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         // Transcribe voice if present
         let voice_transcription = transcribe_voice(&bot, &state, &msg).await;
 
-        let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription);
+        // Extract documents if present
+        let documents = extract_documents(&bot, &msg).await;
+
+        let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription, documents);
         chatbot.handle_message(chat_msg).await;
     }
 
@@ -422,6 +433,7 @@ fn telegram_to_chat_message_with_media(
     msg: &Message,
     image: Option<(Vec<u8>, String)>,
     voice_transcription: Option<String>,
+    documents: Vec<DocumentContent>,
 ) -> ChatMessage {
     let user = msg.from.as_ref();
     let user_id = user.map(|u| u.id.0 as i64).unwrap_or(0);
@@ -461,6 +473,69 @@ fn telegram_to_chat_message_with_media(
         reply_to,
         image,
         voice_transcription,
+        documents,
+    }
+}
+
+/// Download and extract text from document attachments (.docx files).
+async fn extract_documents(bot: &Bot, msg: &Message) -> Vec<DocumentContent> {
+    use chatbot::docx;
+    use teloxide::net::Download;
+
+    let doc = match msg.document() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    // Only process .docx files
+    let filename = doc.file_name.as_deref().unwrap_or("document");
+    if !filename.to_lowercase().ends_with(".docx") {
+        info!("📄 Skipping non-docx document: {}", filename);
+        return vec![];
+    }
+
+    info!("📄 Processing document: {}", filename);
+
+    // Download the file
+    let file = match bot.get_file(doc.file.id.clone()).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Failed to get document file info: {}", e);
+            return vec![DocumentContent {
+                filename: filename.to_string(),
+                text: format!("[Document download failed: {}]", e),
+            }];
+        }
+    };
+
+    let mut data = Vec::new();
+    if let Err(e) = bot.download_file(&file.path, &mut data).await {
+        warn!("Failed to download document: {}", e);
+        return vec![DocumentContent {
+            filename: filename.to_string(),
+            text: format!("[Document download failed: {}]", e),
+        }];
+    }
+
+    info!("📥 Downloaded document ({} bytes)", data.len());
+
+    // Extract text from docx
+    match docx::extract_text(&data) {
+        Ok(text) => {
+            let preview = docx::preview(&text, 100);
+            info!("📝 Extracted text: \"{}\"", preview);
+            vec![DocumentContent {
+                filename: filename.to_string(),
+                text,
+            }]
+        }
+        Err(e) => {
+            warn!("Document extraction failed: {}", e);
+            vec![DocumentContent {
+                filename: filename.to_string(),
+                text: format!("[Document extraction failed: {}]", e),
+            }]
+        }
     }
 }
 

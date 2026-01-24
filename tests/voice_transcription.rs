@@ -9,8 +9,8 @@
 #[cfg(feature = "integ_test")]
 mod tests {
     use std::path::PathBuf;
-    use claudir::chatbot::whisper::Whisper;
-    use claudir::chatbot::message::ChatMessage;
+    use claudima::chatbot::whisper::Whisper;
+    use claudima::chatbot::message::ChatMessage;
 
     /// Path to test Whisper model (set via env var or default location)
     fn get_test_model_path() -> PathBuf {
