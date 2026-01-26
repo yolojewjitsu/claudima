@@ -317,8 +317,8 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
     let text = msg.text().or_else(|| msg.caption());
     let has_image = msg.photo().is_some();
     let has_voice = msg.voice().is_some();
-    let has_document = msg.document().map_or(false, |d| {
-        d.file_name.as_deref().map_or(false, |f| f.to_lowercase().ends_with(".docx"))
+    let has_document = msg.document().is_some_and(|d| {
+        d.file_name.as_deref().is_some_and(|f| f.to_lowercase().ends_with(".docx"))
     });
 
     // Skip if no text, image, voice, or document
@@ -330,7 +330,7 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
     let is_spam = if let Some(text) = text {
         // Owners and trusted channels bypass spam filter
         let bypass_filter = state.config.is_owner(user.id)
-            || msg.sender_chat.as_ref().map_or(false, |c| state.config.is_trusted_channel(c.id));
+            || msg.sender_chat.as_ref().is_some_and(|c| state.config.is_trusted_channel(c.id));
 
         if bypass_filter {
             info!("Bypass spam filter for {username} ({})", user.id);

@@ -171,16 +171,6 @@ fn extract_text_from_xml(xml: &str) -> String {
     result
 }
 
-/// Check if a file is likely a DOCX based on its magic bytes.
-pub fn is_docx(data: &[u8]) -> bool {
-    // DOCX files start with PK (ZIP magic) and contain specific content
-    if data.len() < 4 {
-        return false;
-    }
-    // ZIP magic bytes
-    data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
-}
-
 /// Get a preview of document content (first N chars).
 pub fn preview(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
@@ -219,19 +209,6 @@ mod tests {
         let xml = r#"<w:document><w:body><w:p><w:r><w:t>A &lt; B &amp; C &gt; D</w:t></w:r></w:p></w:body></w:document>"#;
         let text = extract_text_from_xml(xml);
         assert_eq!(text, "A < B & C > D");
-    }
-
-    #[test]
-    fn test_is_docx_valid() {
-        // PK ZIP magic bytes
-        let data = [0x50, 0x4B, 0x03, 0x04, 0x00, 0x00];
-        assert!(is_docx(&data));
-    }
-
-    #[test]
-    fn test_is_docx_invalid() {
-        let data = [0x00, 0x00, 0x00, 0x00];
-        assert!(!is_docx(&data));
     }
 
     #[test]

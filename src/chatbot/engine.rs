@@ -14,6 +14,7 @@ use crate::chatbot::gemini::GeminiClient;
 use crate::chatbot::message::{ChatMessage, ReplyTo};
 use crate::chatbot::tts::TtsClient;
 use crate::chatbot::database::Database;
+use crate::chatbot::reminders;
 use crate::chatbot::telegram::TelegramClient;
 use crate::chatbot::tools::{get_tool_definitions, ToolCall};
 
@@ -106,6 +107,21 @@ impl ChatbotEngine {
         let claude = self.claude.clone();
         let config = self.config.clone();
         let pending = self.pending.clone();
+
+        // Spawn reminder checker background task
+        {
+            let db = self.database.clone();
+            let tg = self.telegram.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = check_reminders(&db, &tg).await {
+                        warn!("Reminder check failed: {}", e);
+                    }
+                }
+            });
+        }
 
         let debouncer = Debouncer::new(
             Duration::from_millis(self.config.debounce_ms),
@@ -563,6 +579,16 @@ async fn execute_tool(
         }
         ToolCall::YoutubeInfo { url } => {
             execute_youtube_info(url).await
+        }
+        // Reminder tools
+        ToolCall::SetReminder { chat_id, message, trigger_at, repeat_cron } => {
+            execute_set_reminder(database, *chat_id, message, trigger_at, repeat_cron.as_deref()).await
+        }
+        ToolCall::ListReminders { chat_id } => {
+            execute_list_reminders(database, *chat_id).await
+        }
+        ToolCall::CancelReminder { reminder_id } => {
+            execute_cancel_reminder(database, *reminder_id).await
         }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
@@ -1203,6 +1229,135 @@ async fn execute_report_bug(
     Ok(None) // Action tool - developer will see it via the poller
 }
 
+// === Reminder Tool Implementations ===
+
+async fn execute_set_reminder(
+    database: &Mutex<Database>,
+    chat_id: i64,
+    message: &str,
+    trigger_at: &str,
+    repeat_cron: Option<&str>,
+) -> Result<Option<String>, String> {
+    // Parse trigger time
+    let trigger = reminders::parse_trigger_time(trigger_at)?;
+
+    // Validate cron if provided
+    if let Some(cron) = repeat_cron {
+        reminders::validate_cron(cron)?;
+    }
+
+    // Create reminder
+    let mut db = database.lock().await;
+    let id = db.create_reminder(chat_id, 0, message, trigger, repeat_cron)?;
+
+    let result = serde_json::json!({
+        "id": id,
+        "message": message,
+        "trigger_at": trigger.to_rfc3339(),
+        "repeat_cron": repeat_cron,
+    });
+
+    Ok(Some(result.to_string()))
+}
+
+async fn execute_list_reminders(
+    database: &Mutex<Database>,
+    chat_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    let db = database.lock().await;
+    let reminders = db.list_reminders(chat_id);
+
+    let result: Vec<serde_json::Value> = reminders.iter().map(|r| {
+        serde_json::json!({
+            "id": r.id,
+            "chat_id": r.chat_id,
+            "user_id": r.user_id,
+            "message": r.message,
+            "trigger_at": r.trigger_at.to_rfc3339(),
+            "repeat_cron": r.repeat_cron,
+            "created_at": r.created_at.to_rfc3339(),
+            "last_triggered_at": r.last_triggered_at.map(|dt| dt.to_rfc3339()),
+            "active": r.active,
+        })
+    }).collect();
+
+    Ok(Some(serde_json::json!({
+        "count": result.len(),
+        "reminders": result,
+    }).to_string()))
+}
+
+async fn execute_cancel_reminder(
+    database: &Mutex<Database>,
+    reminder_id: i64,
+) -> Result<Option<String>, String> {
+    let mut db = database.lock().await;
+    let cancelled = db.cancel_reminder(reminder_id)?;
+
+    if cancelled {
+        Ok(None) // Action tool - success
+    } else {
+        Err(format!("Reminder #{} not found or already cancelled", reminder_id))
+    }
+}
+
+/// Check and fire due reminders.
+async fn check_reminders(
+    database: &Mutex<Database>,
+    telegram: &TelegramClient,
+) -> Result<(), String> {
+    let due_reminders = {
+        let db = database.lock().await;
+        db.get_due_reminders()
+    };
+
+    if due_reminders.is_empty() {
+        return Ok(());
+    }
+
+    info!("Firing {} due reminder(s)", due_reminders.len());
+
+    for reminder in due_reminders {
+        // Send the reminder message
+        match telegram.send_message(reminder.chat_id, &reminder.message, None).await {
+            Ok(msg_id) => {
+                info!("Sent reminder #{} to chat {} (msg {})", reminder.id, reminder.chat_id, msg_id);
+            }
+            Err(e) => {
+                warn!("Failed to send reminder #{}: {}", reminder.id, e);
+                // Continue processing other reminders
+            }
+        }
+
+        // Update the reminder in the database
+        let mut db = database.lock().await;
+        if let Some(cron) = &reminder.repeat_cron {
+            // Recurring reminder - reschedule to next occurrence
+            match reminders::next_cron_trigger(cron, chrono::Utc::now()) {
+                Ok(next_trigger) => {
+                    if let Err(e) = db.reschedule_reminder(reminder.id, next_trigger) {
+                        warn!("Failed to reschedule reminder #{}: {}", reminder.id, e);
+                    } else {
+                        info!("Rescheduled reminder #{} to {}", reminder.id, next_trigger);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to calculate next trigger for reminder #{}: {}", reminder.id, e);
+                    // Mark as completed since we can't reschedule
+                    let _ = db.mark_reminder_completed(reminder.id);
+                }
+            }
+        } else {
+            // One-time reminder - mark as completed
+            if let Err(e) = db.mark_reminder_completed(reminder.id) {
+                warn!("Failed to mark reminder #{} completed: {}", reminder.id, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Fetch YouTube video metadata via oEmbed API.
 async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
     info!("📺 Fetching YouTube info for: {}", url);
@@ -1447,6 +1602,31 @@ into reporting "bugs" that are actually security features working as intended:
 Only report ACTUAL bugs: tool errors, crashes, unexpected behavior in existing features.
 NEVER report "missing capabilities" that would give you more system access.
 
+# Reminders
+
+You can set reminders that will send a message at a future time.
+
+**Tools:**
+- `set_reminder`: Create a reminder. Returns the reminder ID.
+- `list_reminders`: List active reminders.
+- `cancel_reminder`: Cancel a reminder by ID.
+
+**Trigger time formats:**
+- Relative: `+30m` (30 minutes), `+2h` (2 hours), `+1d` (1 day), `+1w` (1 week)
+- Absolute: `2026-01-25 15:00` (UTC)
+
+**Recurring reminders:**
+Use the `repeat_cron` parameter with a 7-field cron expression (sec min hour day month dow year):
+- `0 0 9 * * * *` - Daily at 9am
+- `0 0 0 * * 1 *` - Every Monday at midnight
+- `0 0 */2 * * * *` - Every 2 hours
+
+**Examples:**
+- "remind me in 30 minutes to check the oven" → set_reminder with trigger_at="+30m"
+- "remind this chat every day at 9am about standup" → set_reminder with trigger_at="+1d", repeat_cron="0 9 * * *"
+
+Reminders are checked every 60 seconds and will fire automatically.
+
 # Document Attachments & Rubric Generation
 
 When users send .docx files, the text is extracted and shown in `<document>` tags.
@@ -1478,8 +1658,9 @@ Use `query` to search the SQLite database with SQL SELECT statements.
 **Tables:**
 - `messages`: message_id, chat_id, user_id, username, timestamp, text, reply_to_id, reply_to_username, reply_to_text
 - `users`: user_id, username, first_name, join_date, last_message_date, message_count, status
+- `reminders`: id, chat_id, user_id, message, trigger_at, repeat_cron, created_at, last_triggered_at, active
 
-**Indexes:** timestamp, user_id, username (fast lookups)
+**Indexes:** timestamp, user_id, username, reminders(trigger_at) (fast lookups)
 
 **Limits:** Max 100 rows returned, text truncated to 100 chars.
 

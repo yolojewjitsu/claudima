@@ -1,6 +1,8 @@
-//! Persistent SQLite database for messages and members.
+//! Persistent SQLite database for messages, members, and reminders.
 
 use crate::chatbot::message::{ChatMessage, ReplyTo};
+use crate::chatbot::reminders::Reminder;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
@@ -50,14 +52,6 @@ impl Database {
         db
     }
 
-    /// Create a database at the given path.
-    pub fn with_path(path: std::path::PathBuf) -> Self {
-        let conn = Connection::open(&path).expect("Failed to open database");
-        let db = Self { conn: Mutex::new(conn) };
-        db.init_schema();
-        db
-    }
-
     /// Load from file if it exists, otherwise create new.
     pub fn load_or_new(path: &Path) -> Self {
         // Check if we need to migrate from JSON
@@ -80,13 +74,6 @@ impl Database {
         info!("Loaded database from {:?} ({} messages, {} members)", path, msg_count, member_count);
 
         db
-    }
-
-    /// Load from a JSON file (for backwards compatibility).
-    pub fn load(path: &Path) -> Result<Self, String> {
-        // Convert .json path to .db path
-        let db_path = path.with_extension("db");
-        Ok(Self::load_or_new(&db_path))
     }
 
     fn init_schema(&self) {
@@ -120,6 +107,19 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_messages_username ON messages(username);
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                trigger_at TEXT NOT NULL,
+                repeat_cron TEXT,
+                created_at TEXT NOT NULL,
+                last_triggered_at TEXT,
+                active INTEGER DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminders_active ON reminders(trigger_at) WHERE active = 1;
         "#).expect("Failed to initialize database schema");
     }
 
@@ -274,14 +274,11 @@ impl Database {
         let mut result: Vec<ChatMessage> = Vec::new();
 
         let rows = stmt.query_map([], |row| {
-            let reply_to = match row.get::<_, Option<i64>>(6)? {
-                Some(id) => Some(ReplyTo {
-                    message_id: id,
-                    username: row.get::<_, String>(7).unwrap_or_default(),
-                    text: row.get::<_, String>(8).unwrap_or_default(),
-                }),
-                None => None,
-            };
+            let reply_to = row.get::<_, Option<i64>>(6)?.map(|id| ReplyTo {
+                message_id: id,
+                username: row.get::<_, String>(7).unwrap_or_default(),
+                text: row.get::<_, String>(8).unwrap_or_default(),
+            });
 
             Ok(ChatMessage {
                 message_id: row.get(0)?,
@@ -297,15 +294,13 @@ impl Database {
             })
         }).unwrap();
 
-        for row in rows {
-            if let Ok(msg) = row {
-                let msg_chars = msg.format().len();
-                if total_chars + msg_chars > chars_budget && !result.is_empty() {
-                    break;
-                }
-                total_chars += msg_chars;
-                result.push(msg);
+        for msg in rows.flatten() {
+            let msg_chars = msg.format().len();
+            if total_chars + msg_chars > chars_budget && !result.is_empty() {
+                break;
             }
+            total_chars += msg_chars;
+            result.push(msg);
         }
 
         result.reverse();
@@ -351,11 +346,11 @@ impl Database {
             }
 
             let mut values: Vec<String> = Vec::new();
-            for i in 0..column_count {
+            for (i, col_name) in column_names.iter().enumerate().take(column_count) {
                 let value: String = row.get::<_, rusqlite::types::Value>(i)
                     .map(|v| match v {
                         rusqlite::types::Value::Null => "NULL".to_string(),
-                        rusqlite::types::Value::Integer(i) => i.to_string(),
+                        rusqlite::types::Value::Integer(n) => n.to_string(),
                         rusqlite::types::Value::Real(f) => f.to_string(),
                         rusqlite::types::Value::Text(s) => {
                             // Use chars() to respect UTF-8 character boundaries
@@ -368,7 +363,7 @@ impl Database {
                         rusqlite::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
                     })
                     .unwrap_or_else(|_| "?".to_string());
-                values.push(format!("{}: {}", column_names[i], value));
+                values.push(format!("{}: {}", col_name, value));
             }
             results.push(values.join(" | "));
             row_count += 1;
@@ -553,6 +548,167 @@ impl Database {
         conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) as usize
     }
+
+    // ==================== REMINDER METHODS ====================
+
+    /// Create a new reminder. Returns the reminder ID.
+    pub fn create_reminder(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        message: &str,
+        trigger_at: DateTime<Utc>,
+        repeat_cron: Option<&str>,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let trigger_str = trigger_at.to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO reminders (chat_id, user_id, message, trigger_at, repeat_cron, created_at, active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![chat_id, user_id, message, trigger_str, repeat_cron, now]
+        ).map_err(|e| format!("Failed to create reminder: {e}"))?;
+
+        let id = conn.last_insert_rowid();
+        info!("Created reminder #{} for chat {} at {}", id, chat_id, trigger_at);
+        Ok(id)
+    }
+
+    /// List active reminders, optionally filtered by chat_id.
+    pub fn list_reminders(&self, chat_id: Option<i64>) -> Vec<Reminder> {
+        let conn = self.conn.lock().unwrap();
+
+        let sql = match chat_id {
+            Some(_) => "SELECT id, chat_id, user_id, message, trigger_at, repeat_cron, created_at, last_triggered_at, active
+                        FROM reminders WHERE active = 1 AND chat_id = ?1 ORDER BY trigger_at ASC",
+            None => "SELECT id, chat_id, user_id, message, trigger_at, repeat_cron, created_at, last_triggered_at, active
+                     FROM reminders WHERE active = 1 ORDER BY trigger_at ASC",
+        };
+
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to prepare list_reminders query: {e}");
+                return Vec::new();
+            }
+        };
+
+        let rows = if let Some(cid) = chat_id {
+            stmt.query(params![cid])
+        } else {
+            stmt.query([])
+        };
+
+        let mut results = Vec::new();
+        if let Ok(mut rows) = rows {
+            while let Ok(Some(row)) = rows.next() {
+                if let Ok(reminder) = Self::row_to_reminder(row) {
+                    results.push(reminder);
+                }
+            }
+        }
+        results
+    }
+
+    /// Cancel a reminder by ID. Returns true if found and cancelled.
+    pub fn cancel_reminder(&mut self, reminder_id: i64) -> Result<bool, String> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE reminders SET active = 0 WHERE id = ?1 AND active = 1",
+            params![reminder_id]
+        ).map_err(|e| format!("Failed to cancel reminder: {e}"))?;
+
+        if rows > 0 {
+            info!("Cancelled reminder #{}", reminder_id);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Get all due reminders (trigger_at <= now AND active = 1).
+    pub fn get_due_reminders(&self) -> Vec<Reminder> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        let mut stmt = match conn.prepare(
+            "SELECT id, chat_id, user_id, message, trigger_at, repeat_cron, created_at, last_triggered_at, active
+             FROM reminders WHERE active = 1 AND trigger_at <= ?1 ORDER BY trigger_at ASC"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to prepare get_due_reminders query: {e}");
+                return Vec::new();
+            }
+        };
+
+        let mut results = Vec::new();
+        if let Ok(mut rows) = stmt.query(params![now]) {
+            while let Ok(Some(row)) = rows.next() {
+                if let Ok(reminder) = Self::row_to_reminder(row) {
+                    results.push(reminder);
+                }
+            }
+        }
+        results
+    }
+
+    /// Mark a one-time reminder as completed (active = 0).
+    pub fn mark_reminder_completed(&mut self, reminder_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE reminders SET active = 0, last_triggered_at = ?1 WHERE id = ?2",
+            params![now, reminder_id]
+        ).map_err(|e| format!("Failed to mark reminder completed: {e}"))?;
+        debug!("Marked reminder #{} as completed", reminder_id);
+        Ok(())
+    }
+
+    /// Reschedule a recurring reminder to its next trigger time.
+    pub fn reschedule_reminder(&mut self, reminder_id: i64, next_trigger: DateTime<Utc>) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let trigger_str = next_trigger.to_rfc3339();
+        conn.execute(
+            "UPDATE reminders SET trigger_at = ?1, last_triggered_at = ?2 WHERE id = ?3",
+            params![trigger_str, now, reminder_id]
+        ).map_err(|e| format!("Failed to reschedule reminder: {e}"))?;
+        debug!("Rescheduled reminder #{} to {}", reminder_id, next_trigger);
+        Ok(())
+    }
+
+    /// Convert a database row to a Reminder struct.
+    fn row_to_reminder(row: &rusqlite::Row) -> rusqlite::Result<Reminder> {
+        let trigger_str: String = row.get(4)?;
+        let created_str: String = row.get(6)?;
+        let last_triggered_str: Option<String> = row.get(7)?;
+
+        let trigger_at = DateTime::parse_from_rfc3339(&trigger_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let created_at = DateTime::parse_from_rfc3339(&created_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let last_triggered_at = last_triggered_str.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        });
+
+        Ok(Reminder {
+            id: row.get(0)?,
+            chat_id: row.get(1)?,
+            user_id: row.get(2)?,
+            message: row.get(3)?,
+            trigger_at,
+            repeat_cron: row.get(5)?,
+            created_at,
+            last_triggered_at,
+            active: row.get::<_, i64>(8)? == 1,
+        })
+    }
 }
 
 impl Default for Database {
@@ -632,5 +788,46 @@ mod tests {
         db.member_banned(100);
         let member = db.find_user_by_username("testuser").unwrap();
         assert_eq!(member.status, MemberStatus::Banned);
+    }
+
+    #[test]
+    fn test_create_and_list_reminders() {
+        let mut db = Database::new();
+        let trigger = Utc::now() + chrono::Duration::hours(1);
+
+        let id = db.create_reminder(-12345, 100, "Test reminder", trigger, None).unwrap();
+        assert!(id > 0);
+
+        let reminders = db.list_reminders(Some(-12345));
+        assert_eq!(reminders.len(), 1);
+        assert_eq!(reminders[0].message, "Test reminder");
+        assert_eq!(reminders[0].chat_id, -12345);
+    }
+
+    #[test]
+    fn test_cancel_reminder() {
+        let mut db = Database::new();
+        let trigger = Utc::now() + chrono::Duration::hours(1);
+
+        let id = db.create_reminder(-12345, 100, "Test", trigger, None).unwrap();
+        assert_eq!(db.list_reminders(None).len(), 1);
+
+        let cancelled = db.cancel_reminder(id).unwrap();
+        assert!(cancelled);
+        assert_eq!(db.list_reminders(None).len(), 0);
+    }
+
+    #[test]
+    fn test_due_reminders() {
+        let mut db = Database::new();
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let future = Utc::now() + chrono::Duration::hours(1);
+
+        db.create_reminder(-12345, 100, "Past", past, None).unwrap();
+        db.create_reminder(-12345, 100, "Future", future, None).unwrap();
+
+        let due = db.get_due_reminders();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].message, "Past");
     }
 }

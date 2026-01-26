@@ -42,13 +42,13 @@ impl TtsClient {
             .await
         {
             Ok(response) => {
-                if response.status().is_success() {
-                    if let Ok(resp) = response.json::<ListReferencesResponse>().await {
-                        if resp.success {
-                            return resp.reference_ids;
-                        }
-                        warn!("Voice list API returned success=false");
+                if response.status().is_success()
+                    && let Ok(resp) = response.json::<ListReferencesResponse>().await
+                {
+                    if resp.success {
+                        return resp.reference_ids;
                     }
+                    warn!("Voice list API returned success=false");
                 }
                 warn!("Failed to parse voice list response");
                 vec![]

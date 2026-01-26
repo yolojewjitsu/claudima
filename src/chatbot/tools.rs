@@ -188,6 +188,34 @@ pub enum ToolCall {
         url: String,
     },
 
+    // === Reminder Tools ===
+
+    /// Set a reminder to send a message at a future time.
+    SetReminder {
+        /// Chat ID where the reminder message will be sent
+        chat_id: i64,
+        /// The message to send when the reminder triggers
+        message: String,
+        /// When to trigger: relative ("+30m", "+2h", "+1d") or absolute ("2026-01-25 15:00")
+        trigger_at: String,
+        /// Optional cron expression for recurring reminders (e.g. "0 9 * * *" for daily at 9am)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        repeat_cron: Option<String>,
+    },
+
+    /// List active reminders.
+    ListReminders {
+        /// Optional chat ID to filter by (omit for all chats)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_id: Option<i64>,
+    },
+
+    /// Cancel a reminder by ID.
+    CancelReminder {
+        /// The reminder ID to cancel
+        reminder_id: i64,
+    },
+
     /// Do nothing - acknowledge a message without taking action.
     Noop,
 
@@ -493,6 +521,42 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "properties": {}
             }),
         },
+        // === Reminder Tools ===
+        Tool {
+            name: "set_reminder".to_string(),
+            description: "Set a reminder to send a message at a future time. Use for scheduling messages, alerts, or recurring announcements.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": { "type": "integer", "description": "Chat ID where the reminder will be sent" },
+                    "message": { "type": "string", "description": "The message to send when the reminder triggers" },
+                    "trigger_at": { "type": "string", "description": "When to trigger: relative ('+30m', '+2h', '+1d') or absolute ('2026-01-25 15:00')" },
+                    "repeat_cron": { "type": "string", "description": "Optional 7-field cron (sec min hour day month dow year). E.g. '0 0 9 * * * *' for daily 9am, '0 0 0 * * 1 *' for Mondays" }
+                },
+                "required": ["chat_id", "message", "trigger_at"]
+            }),
+        },
+        Tool {
+            name: "list_reminders".to_string(),
+            description: "List active reminders. Returns ID, message, trigger time, and whether it's recurring.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": { "type": "integer", "description": "Optional chat ID to filter by (omit for all)" }
+                }
+            }),
+        },
+        Tool {
+            name: "cancel_reminder".to_string(),
+            description: "Cancel a reminder by its ID. Get the ID from list_reminders.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reminder_id": { "type": "integer", "description": "The reminder ID to cancel" }
+                },
+                "required": ["reminder_id"]
+            }),
+        },
         Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
@@ -543,7 +607,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 26);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "query");
@@ -566,6 +630,9 @@ mod tests {
         assert_eq!(tools[19].name, "report_bug");
         assert_eq!(tools[20].name, "youtube_info");
         assert_eq!(tools[21].name, "noop");
-        assert_eq!(tools[22].name, "done");
+        assert_eq!(tools[22].name, "set_reminder");
+        assert_eq!(tools[23].name, "list_reminders");
+        assert_eq!(tools[24].name, "cancel_reminder");
+        assert_eq!(tools[25].name, "done");
     }
 }

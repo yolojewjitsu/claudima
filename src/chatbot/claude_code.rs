@@ -49,7 +49,11 @@ const TOOL_CALLS_SCHEMA: &str = r#"{
           "prompt": { "type": "string" },
           "caption": { "type": "string" },
           "description": { "type": "string" },
-          "severity": { "type": "string" }
+          "severity": { "type": "string" },
+          "trigger_at": { "type": "string" },
+          "repeat_cron": { "type": "string" },
+          "reminder_id": { "type": "integer" },
+          "message": { "type": "string" }
         },
         "required": ["tool"]
       }
@@ -302,6 +306,15 @@ struct RawToolCall {
     // query tool field
     #[serde(default)]
     sql: Option<String>,
+    // reminder tool fields
+    #[serde(default)]
+    trigger_at: Option<String>,
+    #[serde(default)]
+    repeat_cron: Option<String>,
+    #[serde(default)]
+    reminder_id: Option<i64>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 impl RawToolCall {
@@ -402,8 +415,21 @@ impl RawToolCall {
                 }),
                 "noop" => Ok(ToolCall::Noop),
                 "done" => Ok(ToolCall::Done),
+                // Reminder tools
+                "set_reminder" => Ok(ToolCall::SetReminder {
+                    chat_id: self.chat_id.ok_or("set_reminder requires chat_id")?,
+                    message: self.message.clone().ok_or("set_reminder requires message")?,
+                    trigger_at: self.trigger_at.clone().ok_or("set_reminder requires trigger_at")?,
+                    repeat_cron: self.repeat_cron.clone(),
+                }),
+                "list_reminders" => Ok(ToolCall::ListReminders {
+                    chat_id: self.chat_id,
+                }),
+                "cancel_reminder" => Ok(ToolCall::CancelReminder {
+                    reminder_id: self.reminder_id.ok_or("cancel_reminder requires reminder_id")?,
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, noop, done", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, set_reminder, list_reminders, cancel_reminder, noop, done", self.tool)),
             }
         };
 
