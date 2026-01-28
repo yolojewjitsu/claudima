@@ -1458,28 +1458,44 @@ async fn execute_add_trusted_user(
         (None, None) => return Err("Must provide user_id or username".to_string()),
     };
 
+    // Prevent owner from adding themselves
+    let owner_id = config.owner.as_ref().map(|o| o.id);
+    if Some(resolved_id) == owner_id {
+        return Err("Owner is already trusted by default".to_string());
+    }
+
     let shared = config.trusted_dm_users_shared.as_ref()
         .ok_or("Trusted users management not configured")?;
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check and add in single lock scope (avoid race condition)
+    // Check if already in list (without modifying yet)
     {
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        let users = shared.read().expect("trusted_dm_users lock poisoned");
         if users.contains(&UserId(resolved_id as u64)) {
             return Err(format!("User {} is already in trusted list", resolved_id));
         }
-        users.insert(UserId(resolved_id as u64));
     }
 
-    // Save to config file
-    save_trusted_users_to_config(config_path, shared).await?;
-
-    // Fetch username for display
+    // Fetch username for display (before modifying state)
     let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
     let trusted_user = TrustedUser::with_username(resolved_id, fetched_username.clone());
 
-    // Update display list for system prompt
+    // Add to auth list
+    {
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        users.insert(UserId(resolved_id as u64));
+    }
+
+    // Save to config file - rollback on failure
+    if let Err(e) = save_trusted_users_to_config(config_path, shared).await {
+        // Rollback: remove from auth list
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        users.remove(&UserId(resolved_id as u64));
+        return Err(e);
+    }
+
+    // Update display list for system prompt (only after successful save)
     {
         let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
         display_users.push(trusted_user.clone());
@@ -1534,18 +1550,29 @@ async fn execute_remove_trusted_user(
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check and remove in single lock scope (avoid race condition)
+    // Check if in list (without modifying yet)
     {
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        if !users.remove(&UserId(resolved_id as u64)) {
+        let users = shared.read().expect("trusted_dm_users lock poisoned");
+        if !users.contains(&UserId(resolved_id as u64)) {
             return Err(format!("User {} is not in trusted list", resolved_id));
         }
     }
 
-    // Save to config file
-    save_trusted_users_to_config(config_path, shared).await?;
+    // Remove from auth list
+    {
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        users.remove(&UserId(resolved_id as u64));
+    }
 
-    // Update display list for system prompt
+    // Save to config file - rollback on failure
+    if let Err(e) = save_trusted_users_to_config(config_path, shared).await {
+        // Rollback: re-add to auth list
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        users.insert(UserId(resolved_id as u64));
+        return Err(e);
+    }
+
+    // Update display list for system prompt (only after successful save)
     {
         let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
         display_users.retain(|u| u.id != resolved_id);
