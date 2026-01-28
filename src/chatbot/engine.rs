@@ -1538,7 +1538,7 @@ async fn execute_remove_trusted_user(
                 let db = database.lock().await;
                 db.find_user_by_username(name_clean)
                     .map(|m| m.user_id)
-                    .ok_or_else(|| format!("User @{} not found", name))?
+                    .ok_or_else(|| format!("User @{} not found", name_clean))?
             }
         }
         (None, None) => return Err("Must provide user_id or username".to_string()),
