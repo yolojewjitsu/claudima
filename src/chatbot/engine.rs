@@ -1,8 +1,8 @@
 //! Chatbot engine - relays Telegram messages to Claude Code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -24,15 +24,41 @@ const MAX_ITERATIONS: usize = 10;
 /// Token budget for context restoration after compaction.
 const COMPACTION_RESTORE_TOKENS: usize = 10000;
 
+/// A trusted user with ID and optional username.
+#[derive(Debug, Clone)]
+pub struct TrustedUser {
+    pub id: i64,
+    pub username: Option<String>,
+}
+
+impl TrustedUser {
+    pub fn with_username(id: i64, username: Option<String>) -> Self {
+        Self { id, username }
+    }
+
+    /// Format as "@username (id)" or just "id" if no username
+    pub fn display(&self) -> String {
+        match &self.username {
+            Some(u) => format!("@{} ({})", u, self.id),
+            None => self.id.to_string(),
+        }
+    }
+}
+
 /// Chatbot configuration.
 #[derive(Debug, Clone)]
 pub struct ChatbotConfig {
     pub primary_chat_id: i64,
     pub bot_user_id: i64,
     pub bot_username: Option<String>,
-    pub owner_user_id: Option<i64>,
-    /// User IDs allowed to DM the bot (in addition to owner)
-    pub trusted_dm_user_ids: Vec<i64>,
+    /// The bot owner
+    pub owner: Option<TrustedUser>,
+    /// Users allowed to DM the bot (in addition to owner).
+    /// Key = user_id, Value = optional username.
+    /// Single source of truth shared with Config for hot-reload.
+    pub trusted_dm_users: Arc<RwLock<HashMap<i64, Option<String>>>>,
+    /// Path to config file for saving changes
+    pub config_path: Option<PathBuf>,
     pub debounce_ms: u64,
     pub data_dir: Option<PathBuf>,
     pub gemini_api_key: Option<String>,
@@ -45,8 +71,9 @@ impl Default for ChatbotConfig {
             primary_chat_id: 0,
             bot_user_id: 0,
             bot_username: None,
-            owner_user_id: None,
-            trusted_dm_user_ids: vec![],
+            owner: None,
+            trusted_dm_users: Arc::new(RwLock::new(HashMap::new())),
+            config_path: None,
             debounce_ms: 1000,
             data_dir: None,
             gemini_api_key: None,
@@ -238,8 +265,8 @@ impl ChatbotEngine {
 
     /// Send startup notification to owner.
     pub async fn notify_owner(&self, message: &str) {
-        let owner_id = match self.config.owner_user_id {
-            Some(id) => id,
+        let owner_id = match &self.config.owner {
+            Some(owner) => owner.id,
             None => return,
         };
 
@@ -360,6 +387,13 @@ async fn process_messages(
     // Only apply default reply when target chat matches the source chat
     let default_reply_to = messages.last().map(|m| (m.message_id, m.chat_id));
 
+    // Get the requesting user and chat (last non-system message) for authorization checks
+    let (requesting_user_id, requesting_chat_id) = messages.iter()
+        .rev()
+        .find(|m| m.user_id != 0) // Skip system messages (user_id = 0)
+        .map(|m| (Some(m.user_id), Some(m.chat_id)))
+        .unwrap_or((None, None));
+
     // Tool call loop
     for iteration in 0..MAX_ITERATIONS {
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
@@ -396,7 +430,7 @@ async fn process_messages(
             }
 
             info!("🔧 Executing: {:?}", tc.call);
-            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to).await;
+            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to, requesting_user_id, requesting_chat_id).await;
             if let Some(ref content) = result.content {
                 // Safely truncate to ~100 chars without breaking UTF-8
                 let truncated: String = content.chars().take(100).collect();
@@ -469,6 +503,11 @@ fn format_messages(messages: &[ChatMessage]) -> String {
 }
 
 /// Execute a tool call.
+///
+/// Note: This function has many parameters because it's the central dispatch
+/// for all tool types, each needing different subsets of context. A struct
+/// would complicate the mutable borrow of memory_files_read.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     config: &ChatbotConfig,
     context: &Mutex<ContextBuffer>,
@@ -477,6 +516,8 @@ async fn execute_tool(
     tc: &ToolCallWithId,
     memory_files_read: &mut HashSet<String>,
     default_reply_to: Option<(i64, i64)>, // (message_id, chat_id)
+    requesting_user_id: Option<i64>,       // for authorization checks
+    requesting_chat_id: Option<i64>,       // for DM-only checks
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
@@ -606,6 +647,12 @@ async fn execute_tool(
         }
         ToolCall::CancelReminder { reminder_id } => {
             execute_cancel_reminder(database, *reminder_id).await
+        }
+        ToolCall::AddTrustedUser { user_id, username } => {
+            execute_add_trusted_user(config, database, telegram, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
+        }
+        ToolCall::RemoveTrustedUser { user_id, username } => {
+            execute_remove_trusted_user(config, database, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
         }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
@@ -776,9 +823,9 @@ async fn execute_delete_message(
     telegram.delete_message(chat_id, message_id).await?;
 
     // Notify owner
-    if let Some(owner_id) = config.owner_user_id {
+    if let Some(owner) = &config.owner {
         let _ = telegram
-            .send_message(owner_id, &format!("🗑️ Deleted message {} in chat {}", message_id, chat_id), None)
+            .send_message(owner.id, &format!("🗑️ Deleted message {} in chat {}", message_id, chat_id), None)
             .await;
     }
 
@@ -799,9 +846,9 @@ async fn execute_mute_user(
     telegram.mute_user(chat_id, user_id, duration).await?;
 
     // Notify owner
-    if let Some(owner_id) = config.owner_user_id {
+    if let Some(owner) = &config.owner {
         let _ = telegram
-            .send_message(owner_id, &format!("🔇 Muted user {} for {} min in chat {}", user_id, duration, chat_id), None)
+            .send_message(owner.id, &format!("🔇 Muted user {} for {} min in chat {}", user_id, duration, chat_id), None)
             .await;
     }
 
@@ -818,9 +865,9 @@ async fn execute_ban_user(
     telegram.ban_user(chat_id, user_id).await?;
 
     // Notify owner
-    if let Some(owner_id) = config.owner_user_id {
+    if let Some(owner) = &config.owner {
         let _ = telegram
-            .send_message(owner_id, &format!("🚫 Banned user {} from chat {}", user_id, chat_id), None)
+            .send_message(owner.id, &format!("🚫 Banned user {} from chat {}", user_id, chat_id), None)
             .await;
     }
 
@@ -837,9 +884,9 @@ async fn execute_kick_user(
     telegram.kick_user(chat_id, user_id).await?;
 
     // Notify owner
-    if let Some(owner_id) = config.owner_user_id {
+    if let Some(owner) = &config.owner {
         let _ = telegram
-            .send_message(owner_id, &format!("👢 Kicked user {} from chat {}", user_id, chat_id), None)
+            .send_message(owner.id, &format!("👢 Kicked user {} from chat {}", user_id, chat_id), None)
             .await;
     }
 
@@ -1318,6 +1365,211 @@ async fn execute_cancel_reminder(
     }
 }
 
+/// Save trusted_dm_users to config file (preserves other fields).
+async fn save_trusted_users_to_config(
+    config_path: &std::path::Path,
+    trusted_dm_users: &RwLock<HashMap<i64, Option<String>>>,
+) -> Result<(), String> {
+    let content = tokio::fs::read_to_string(config_path).await
+        .map_err(|e| format!("Failed to read config: {e}"))?;
+    let mut json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {e}"))?;
+
+    let users: Vec<u64> = trusted_dm_users.read()
+        .expect("trusted_dm_users lock poisoned")
+        .keys()
+        .map(|&id| {
+            debug_assert!(id >= 0, "user_id should never be negative");
+            id as u64
+        })
+        .collect();
+    json["trusted_dm_users"] = serde_json::json!(users);
+
+    let output = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Failed to serialize config: {e}"))?;
+    tokio::fs::write(config_path, output).await
+        .map_err(|e| format!("Failed to write config: {e}"))?;
+
+    Ok(())
+}
+
+/// Format a trusted user for display: "@username (id)" or just "id".
+fn format_trusted_user(user_id: i64, username: Option<&str>) -> String {
+    match username {
+        Some(u) => format!("@{} ({})", u, user_id),
+        None => user_id.to_string(),
+    }
+}
+
+/// Check if requesting user is the owner AND this is a DM with the owner.
+fn check_owner_dm_authorization(
+    config: &ChatbotConfig,
+    requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
+) -> Result<(), String> {
+    let owner_id = config.owner.as_ref()
+        .map(|o| o.id)
+        .ok_or("No owner configured")?;
+
+    let requester = requesting_user_id
+        .ok_or("Cannot determine requesting user")?;
+
+    let chat_id = requesting_chat_id
+        .ok_or("Cannot determine chat")?;
+
+    // Must be the owner
+    if requester != owner_id {
+        return Err("Only the owner can manage trusted users".to_string());
+    }
+
+    // Must be a DM with the owner (in DMs, chat_id == user_id)
+    if chat_id != owner_id {
+        return Err("This command only works in DM with the bot".to_string());
+    }
+
+    Ok(())
+}
+
+/// Resolve username to user_id using database.
+async fn resolve_username_to_id(
+    database: &Mutex<Database>,
+    username: &str,
+) -> Result<i64, String> {
+    // Strip @ if present
+    let username = username.trim_start_matches('@');
+
+    // Look up in database
+    let db = database.lock().await;
+    if let Some(member) = db.find_user_by_username(username) {
+        return Ok(member.user_id);
+    }
+
+    Err(format!("User @{} not found (they must have sent at least one message in the group)", username))
+}
+
+/// Add a user to trusted DM users (owner only, DM only).
+async fn execute_add_trusted_user(
+    config: &ChatbotConfig,
+    database: &Mutex<Database>,
+    telegram: &TelegramClient,
+    user_id: Option<i64>,
+    username: Option<&str>,
+    requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    // Authorization check - must be owner in DM
+    check_owner_dm_authorization(config, requesting_user_id, requesting_chat_id)?;
+
+    // Resolve user_id from username if needed
+    let resolved_id = match (user_id, username) {
+        (Some(id), _) => id,
+        (None, Some(name)) => resolve_username_to_id(database, name).await?,
+        (None, None) => return Err("Must provide user_id or username".to_string()),
+    };
+
+    // Prevent owner from adding themselves
+    let owner_id = config.owner.as_ref().map(|o| o.id);
+    if Some(resolved_id) == owner_id {
+        return Err("Owner is already trusted by default".to_string());
+    }
+
+    let config_path = config.config_path.as_ref()
+        .ok_or("Config path not set")?;
+
+    // Fetch username for display (before taking write lock)
+    let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
+
+    // Check and add in single write lock scope to avoid TOCTOU race
+    {
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        if users.contains_key(&resolved_id) {
+            return Err(format!("User {} is already in trusted list", resolved_id));
+        }
+        users.insert(resolved_id, fetched_username.clone());
+    }
+
+    // Save to config file - rollback on failure
+    if let Err(e) = save_trusted_users_to_config(config_path, &config.trusted_dm_users).await {
+        // Rollback: remove from list
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.remove(&resolved_id);
+        return Err(e);
+    }
+
+    let user_display = format_trusted_user(resolved_id, fetched_username.as_deref());
+    info!("✅ Added trusted DM user: {}", user_display);
+
+    let username_str = fetched_username.map(|u| format!(" (@{})", u)).unwrap_or_default();
+    Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", resolved_id, username_str)))
+}
+
+/// Remove a user from trusted DM users (owner only, DM only).
+async fn execute_remove_trusted_user(
+    config: &ChatbotConfig,
+    database: &Mutex<Database>,
+    user_id: Option<i64>,
+    username: Option<&str>,
+    requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    // Authorization check - must be owner in DM
+    check_owner_dm_authorization(config, requesting_user_id, requesting_chat_id)?;
+
+    // Resolve user_id from username if needed
+    let resolved_id = match (user_id, username) {
+        (Some(id), _) => id,
+        (None, Some(name)) => {
+            // For removal, check the trusted list first (no await needed)
+            let name_clean = name.trim_start_matches('@');
+            let found_in_list = {
+                let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+                users.iter()
+                    .find(|(id, uname)| {
+                        uname.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(name_clean))
+                            || id.to_string() == name_clean
+                    })
+                    .map(|(&id, _)| id)
+            };
+
+            if let Some(id) = found_in_list {
+                id
+            } else {
+                // Fall back to database lookup
+                let db = database.lock().await;
+                db.find_user_by_username(name_clean)
+                    .map(|m| m.user_id)
+                    .ok_or_else(|| format!("User @{} not found", name_clean))?
+            }
+        }
+        (None, None) => return Err("Must provide user_id or username".to_string()),
+    };
+
+    let config_path = config.config_path.as_ref()
+        .ok_or("Config path not set")?;
+
+    // Check and remove in single write lock scope (avoids TOCTOU race)
+    let old_username = {
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        match users.remove(&resolved_id) {
+            Some(uname) => uname,
+            None => return Err(format!("User {} is not in trusted list", resolved_id)),
+        }
+    };
+
+    // Save to config file - rollback on failure
+    if let Err(e) = save_trusted_users_to_config(config_path, &config.trusted_dm_users).await {
+        // Rollback: re-add with old username
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.insert(resolved_id, old_username);
+        return Err(e);
+    }
+
+    let user_display = format_trusted_user(resolved_id, old_username.as_deref());
+    info!("✅ Removed trusted DM user: {}", user_display);
+
+    Ok(Some(format!("Removed {} from trusted DM users. They can no longer DM the bot.", user_display)))
+}
+
 /// Check and fire due reminders.
 async fn check_reminders(
     database: &Mutex<Database>,
@@ -1419,6 +1671,85 @@ async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
     Ok(Some(result))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config_with_owner(owner_id: i64) -> ChatbotConfig {
+        ChatbotConfig {
+            owner: Some(TrustedUser::with_username(owner_id, Some("testowner".to_string()))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_format_trusted_user_with_username() {
+        let result = format_trusted_user(12345, Some("alice"));
+        assert_eq!(result, "@alice (12345)");
+    }
+
+    #[test]
+    fn test_format_trusted_user_without_username() {
+        let result = format_trusted_user(12345, None);
+        assert_eq!(result, "12345");
+    }
+
+    #[test]
+    fn test_trusted_user_display_with_username() {
+        let user = TrustedUser::with_username(12345, Some("bob".to_string()));
+        assert_eq!(user.display(), "@bob (12345)");
+    }
+
+    #[test]
+    fn test_trusted_user_display_without_username() {
+        let user = TrustedUser::with_username(12345, None);
+        assert_eq!(user.display(), "12345");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_success() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_no_owner() {
+        let config = ChatbotConfig::default();
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert_eq!(result.unwrap_err(), "No owner configured");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_owner() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(456), Some(456));
+        assert_eq!(result.unwrap_err(), "Only the owner can manage trusted users");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_in_dm() {
+        let config = test_config_with_owner(123);
+        // Owner (123) in a group chat (-999)
+        let result = check_owner_dm_authorization(&config, Some(123), Some(-999));
+        assert_eq!(result.unwrap_err(), "This command only works in DM with the bot");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_user() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, None, Some(123));
+        assert_eq!(result.unwrap_err(), "Cannot determine requesting user");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_chat() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), None);
+        assert_eq!(result.unwrap_err(), "Cannot determine chat");
+    }
+}
+
 /// Generate system prompt.
 pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>) -> String {
     let username_info = match &config.bot_username {
@@ -1429,18 +1760,18 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
     // Include restart timestamp so the bot knows when it was started
     let restart_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let owner_info = match config.owner_user_id {
-        Some(id) => format!("Trust user=\"{}\" (the owner) only", id),
+    let owner_info = match &config.owner {
+        Some(owner) => format!("Trust user {} (the owner) only", owner.display()),
         None => "No trusted owner configured".to_string(),
     };
 
     let dm_allowed_info = {
         let mut allowed = vec![];
-        if let Some(id) = config.owner_user_id {
-            allowed.push(format!("{} (owner)", id));
+        if let Some(owner) = &config.owner {
+            allowed.push(format!("{} (owner)", owner.display()));
         }
-        for id in &config.trusted_dm_user_ids {
-            allowed.push(id.to_string());
+        for (&user_id, username) in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
+            allowed.push(format_trusted_user(user_id, username.as_deref()));
         }
         if allowed.is_empty() {
             "No one can DM you.".to_string()

@@ -216,6 +216,28 @@ pub enum ToolCall {
         reminder_id: i64,
     },
 
+    // === Admin Tools (owner only, DM only) ===
+
+    /// Add a user to the trusted DM users list. Owner only, must be used in DM.
+    AddTrustedUser {
+        /// User ID to add (optional if username provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<i64>,
+        /// Username to add (without @, optional if user_id provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+    },
+
+    /// Remove a user from the trusted DM users list. Owner only, must be used in DM.
+    RemoveTrustedUser {
+        /// User ID to remove (optional if username provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<i64>,
+        /// Username to remove (without @, optional if user_id provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+    },
+
     /// Do nothing - acknowledge a message without taking action.
     Noop,
 
@@ -557,6 +579,29 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["reminder_id"]
             }),
         },
+        // === Admin Tools (owner only, DM only) ===
+        Tool {
+            name: "add_trusted_user".to_string(),
+            description: "Add a user to the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "integer", "description": "User ID to add (optional if username provided)" },
+                    "username": { "type": "string", "description": "Username to add, with or without @ (optional if user_id provided)" }
+                }
+            }),
+        },
+        Tool {
+            name: "remove_trusted_user".to_string(),
+            description: "Remove a user from the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "integer", "description": "User ID to remove (optional if username provided)" },
+                    "username": { "type": "string", "description": "Username to remove, with or without @ (optional if user_id provided)" }
+                }
+            }),
+        },
         Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
@@ -607,7 +652,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 28);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "query");
@@ -633,6 +678,8 @@ mod tests {
         assert_eq!(tools[22].name, "set_reminder");
         assert_eq!(tools[23].name, "list_reminders");
         assert_eq!(tools[24].name, "cancel_reminder");
-        assert_eq!(tools[25].name, "done");
+        assert_eq!(tools[25].name, "add_trusted_user");
+        assert_eq!(tools[26].name, "remove_trusted_user");
+        assert_eq!(tools[27].name, "done");
     }
 }

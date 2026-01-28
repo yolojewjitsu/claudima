@@ -14,7 +14,7 @@ use teloxide::types::ChatKind;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
-use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, Whisper};
+use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, TrustedUser, Whisper};
 use chatbot::message::DocumentContent;
 use classifier::{classify, Classification};
 use claude::Client as ClaudeClient;
@@ -49,14 +49,48 @@ impl BotState {
         // Create chatbot if enabled
         let chatbot = if !config.allowed_groups.is_empty() {
             let primary_chat_id = config.allowed_groups.iter().next().map(|id| id.0).unwrap_or(0);
-            let owner_user_id = config.owner_ids.iter().next().map(|id| id.0 as i64);
+            let telegram = Arc::new(TelegramClient::new(bot.clone()));
+
+            // Fetch owner info from Telegram
+            let owner = if let Some(owner_id) = config.owner_ids.iter().next() {
+                let username = telegram.get_chat_username(owner_id.0 as i64).await.ok().flatten();
+                let owner = TrustedUser::with_username(owner_id.0 as i64, username);
+                info!("Owner: {}", owner.display());
+                Some(owner)
+            } else {
+                None
+            };
+
+            // Fetch trusted DM users' usernames from Telegram and update the HashMap
+            // Collect IDs first to avoid holding lock across await
+            let trusted_ids: Vec<i64> = config.trusted_dm_users
+                .read()
+                .expect("trusted_dm_users lock poisoned")
+                .keys()
+                .copied()
+                .collect();
+
+            for user_id in trusted_ids {
+                let username = telegram.get_chat_username(user_id).await.ok().flatten();
+                // Update the HashMap with the fetched username
+                {
+                    let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+                    users.insert(user_id, username.clone());
+                }
+                let user_display = match &username {
+                    Some(u) => format!("@{} ({})", u, user_id),
+                    None => user_id.to_string(),
+                };
+                info!("Trusted DM user: {}", user_display);
+            }
 
             let chatbot_config = ChatbotConfig {
                 primary_chat_id,
                 bot_user_id,
                 bot_username: bot_username.clone(),
-                owner_user_id,
-                trusted_dm_user_ids: config.trusted_dm_users.iter().map(|id| id.0 as i64).collect(),
+                owner,
+                trusted_dm_users: config.trusted_dm_users.clone(),
+                config_path: Some(config.config_path.clone()),
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
                 gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
@@ -86,7 +120,6 @@ impl BotState {
                 }
             };
 
-            let telegram = Arc::new(TelegramClient::new(bot.clone()));
             let mut engine = ChatbotEngine::new(chatbot_config, telegram, claude_code);
             engine.start_debouncer();
             engine.notify_owner("hey, just restarted").await;

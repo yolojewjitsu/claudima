@@ -432,4 +432,15 @@ impl TelegramClient {
         unreachable!()
     }
 
+    /// Get username for a user ID via getChat.
+    pub async fn get_chat_username(&self, user_id: i64) -> Result<Option<String>, String> {
+        match self.bot.get_chat(ChatId(user_id)).await {
+            Ok(chat) => Ok(chat.username().map(|s| s.to_string())),
+            Err(e) => {
+                warn!("Could not fetch user {}: {}", user_id, e);
+                Err(format!("Could not fetch user info: {e}"))
+            }
+        }
+    }
+
 }

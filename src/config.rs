@@ -1,7 +1,8 @@
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use teloxide::types::{ChatId, UserId};
 
 #[derive(Deserialize)]
@@ -44,8 +45,12 @@ fn default_max_strikes() -> u8 {
 
 pub struct Config {
     pub owner_ids: HashSet<UserId>,
-    /// Users who can DM the bot but don't have owner privileges
-    pub trusted_dm_users: HashSet<UserId>,
+    /// Users who can DM the bot but don't have owner privileges.
+    /// Key = user_id, Value = optional username (for display).
+    /// This is the single source of truth, shared with ChatbotConfig.
+    pub trusted_dm_users: Arc<RwLock<HashMap<i64, Option<String>>>>,
+    /// Path to the config file (for saving changes)
+    pub config_path: PathBuf,
     pub telegram_bot_token: String,
     pub openrouter_api_key: String,
     pub gemini_api_key: String,
@@ -66,11 +71,17 @@ pub struct Config {
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Self {
-        let content = std::fs::read_to_string(path.as_ref()).expect("Failed to read config file");
+        let config_path = path.as_ref().to_path_buf();
+        let content = std::fs::read_to_string(&config_path).expect("Failed to read config file");
         let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
 
         let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
-        let trusted_dm_users = file.trusted_dm_users.into_iter().map(UserId).collect();
+        // Initialize with None usernames - main.rs will fetch from Telegram
+        let trusted_dm_users = Arc::new(RwLock::new(
+            file.trusted_dm_users.into_iter()
+                .map(|id| (id as i64, None))
+                .collect()
+        ));
         let allowed_groups = file.allowed_groups.into_iter().map(ChatId).collect();
         let trusted_channels = file.trusted_channels.into_iter().map(ChatId).collect();
 
@@ -100,6 +111,7 @@ impl Config {
         Self {
             owner_ids,
             trusted_dm_users,
+            config_path,
             telegram_bot_token: file.telegram_bot_token,
             openrouter_api_key: file.openrouter_api_key,
             gemini_api_key: file.gemini_api_key,
@@ -122,7 +134,10 @@ impl Config {
 
     /// Check if user can DM the bot (owners + trusted DM users)
     pub fn can_dm(&self, user_id: UserId) -> bool {
-        self.owner_ids.contains(&user_id) || self.trusted_dm_users.contains(&user_id)
+        self.owner_ids.contains(&user_id)
+            || self.trusted_dm_users.read()
+                .expect("trusted_dm_users lock poisoned")
+                .contains_key(&(user_id.0 as i64))
     }
 
     pub fn is_trusted_channel(&self, chat_id: ChatId) -> bool {
