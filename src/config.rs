@@ -130,7 +130,7 @@ impl Config {
     /// Check if user can DM the bot (owners + trusted DM users)
     pub fn can_dm(&self, user_id: UserId) -> bool {
         self.owner_ids.contains(&user_id)
-            || self.trusted_dm_users.read().unwrap().contains(&user_id)
+            || self.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").contains(&user_id)
     }
 
     pub fn is_trusted_channel(&self, chat_id: ChatId) -> bool {

@@ -49,10 +49,11 @@ impl BotState {
         // Create chatbot if enabled
         let chatbot = if !config.allowed_groups.is_empty() {
             let primary_chat_id = config.allowed_groups.iter().next().map(|id| id.0).unwrap_or(0);
+            let telegram = Arc::new(TelegramClient::new(bot.clone()));
 
             // Fetch owner info from Telegram
             let owner = if let Some(owner_id) = config.owner_ids.iter().next() {
-                let username = fetch_username(bot, owner_id.0 as i64).await;
+                let username = telegram.get_chat_username(owner_id.0 as i64).await.ok().flatten();
                 let owner = TrustedUser::with_username(owner_id.0 as i64, username);
                 info!("Owner: {}", owner.display());
                 Some(owner)
@@ -62,8 +63,8 @@ impl BotState {
 
             // Fetch trusted DM users info from Telegram
             let mut trusted_dm_users_display = Vec::new();
-            for user_id in config.trusted_dm_users.read().unwrap().iter() {
-                let username = fetch_username(bot, user_id.0 as i64).await;
+            for user_id in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
+                let username = telegram.get_chat_username(user_id.0 as i64).await.ok().flatten();
                 let user = TrustedUser::with_username(user_id.0 as i64, username);
                 info!("Trusted DM user: {}", user.display());
                 trusted_dm_users_display.push(user);
@@ -106,7 +107,6 @@ impl BotState {
                 }
             };
 
-            let telegram = Arc::new(TelegramClient::new(bot.clone()));
             let mut engine = ChatbotEngine::new(chatbot_config, telegram, claude_code);
             engine.start_debouncer();
             engine.notify_owner("hey, just restarted").await;
@@ -184,21 +184,6 @@ fn parse_args() -> (String, Option<String>) {
     }
 
     (config_path, system_message)
-}
-
-/// Fetch username for a user ID via Telegram API.
-/// Returns None if the user cannot be fetched (never interacted with bot).
-async fn fetch_username(bot: &Bot, user_id: i64) -> Option<String> {
-    use teloxide::requests::Requester;
-    use teloxide::types::ChatId;
-
-    match bot.get_chat(ChatId(user_id)).await {
-        Ok(chat) => chat.username().map(|s| s.to_string()),
-        Err(e) => {
-            warn!("Could not fetch user {user_id}: {e}");
-            None
-        }
-    }
 }
 
 #[tokio::main]

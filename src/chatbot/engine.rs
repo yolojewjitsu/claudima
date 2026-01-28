@@ -1416,17 +1416,12 @@ async fn execute_add_trusted_user(
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check if already trusted
+    // Check and add in single lock scope (avoid race condition)
     {
-        let users = shared.read().expect("trusted_dm_users lock poisoned");
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
         if users.contains(&UserId(user_id as u64)) {
             return Err(format!("User {} is already in trusted list", user_id));
         }
-    }
-
-    // Add to shared set (hot-reload)
-    {
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
         users.insert(UserId(user_id as u64));
     }
 
@@ -1458,18 +1453,12 @@ async fn execute_remove_trusted_user(
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check if exists
-    {
-        let users = shared.read().expect("trusted_dm_users lock poisoned");
-        if !users.contains(&UserId(user_id as u64)) {
-            return Err(format!("User {} is not in trusted list", user_id));
-        }
-    }
-
-    // Remove from shared set (hot-reload)
+    // Check and remove in single lock scope (avoid race condition)
     {
         let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        users.remove(&UserId(user_id as u64));
+        if !users.remove(&UserId(user_id as u64)) {
+            return Err(format!("User {} is not in trusted list", user_id));
+        }
     }
 
     // Save to config file
