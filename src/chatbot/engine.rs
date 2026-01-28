@@ -1567,7 +1567,7 @@ async fn execute_remove_trusted_user(
     let user_display = format_trusted_user(resolved_id, old_username.as_deref());
     info!("✅ Removed trusted DM user: {}", user_display);
 
-    Ok(Some(format!("Removed {} from trusted DM users.", user_display)))
+    Ok(Some(format!("Removed {} from trusted DM users. They can no longer DM the bot.", user_display)))
 }
 
 /// Check and fire due reminders.
@@ -1669,6 +1669,85 @@ async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
     );
 
     Ok(Some(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config_with_owner(owner_id: i64) -> ChatbotConfig {
+        ChatbotConfig {
+            owner: Some(TrustedUser::with_username(owner_id, Some("testowner".to_string()))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_format_trusted_user_with_username() {
+        let result = format_trusted_user(12345, Some("alice"));
+        assert_eq!(result, "@alice (12345)");
+    }
+
+    #[test]
+    fn test_format_trusted_user_without_username() {
+        let result = format_trusted_user(12345, None);
+        assert_eq!(result, "12345");
+    }
+
+    #[test]
+    fn test_trusted_user_display_with_username() {
+        let user = TrustedUser::with_username(12345, Some("bob".to_string()));
+        assert_eq!(user.display(), "@bob (12345)");
+    }
+
+    #[test]
+    fn test_trusted_user_display_without_username() {
+        let user = TrustedUser::with_username(12345, None);
+        assert_eq!(user.display(), "12345");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_success() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_no_owner() {
+        let config = ChatbotConfig::default();
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert_eq!(result.unwrap_err(), "No owner configured");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_owner() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(456), Some(456));
+        assert_eq!(result.unwrap_err(), "Only the owner can manage trusted users");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_in_dm() {
+        let config = test_config_with_owner(123);
+        // Owner (123) in a group chat (-999)
+        let result = check_owner_dm_authorization(&config, Some(123), Some(-999));
+        assert_eq!(result.unwrap_err(), "This command only works in DM with the bot");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_user() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, None, Some(123));
+        assert_eq!(result.unwrap_err(), "Cannot determine requesting user");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_chat() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), None);
+        assert_eq!(result.unwrap_err(), "Cannot determine chat");
+    }
 }
 
 /// Generate system prompt.
