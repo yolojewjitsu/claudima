@@ -43,7 +43,8 @@ mod tests {
     fn test_config() -> Config {
         Config {
             owner_ids: std::collections::HashSet::from([teloxide::types::UserId(1)]),
-            trusted_dm_users: std::collections::HashSet::new(),
+            trusted_dm_users: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            config_path: std::path::PathBuf::from("test.json"),
             telegram_bot_token: String::new(),
             openrouter_api_key: String::new(),
             gemini_api_key: String::new(),

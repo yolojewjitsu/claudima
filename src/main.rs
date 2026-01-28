@@ -14,7 +14,7 @@ use teloxide::types::ChatKind;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
-use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, Whisper};
+use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, ReplyTo, TelegramClient, TrustedUser, Whisper};
 use chatbot::message::DocumentContent;
 use classifier::{classify, Classification};
 use claude::Client as ClaudeClient;
@@ -49,14 +49,34 @@ impl BotState {
         // Create chatbot if enabled
         let chatbot = if !config.allowed_groups.is_empty() {
             let primary_chat_id = config.allowed_groups.iter().next().map(|id| id.0).unwrap_or(0);
-            let owner_user_id = config.owner_ids.iter().next().map(|id| id.0 as i64);
+
+            // Fetch owner info from Telegram
+            let owner = if let Some(owner_id) = config.owner_ids.iter().next() {
+                let username = fetch_username(bot, owner_id.0 as i64).await;
+                let owner = TrustedUser::with_username(owner_id.0 as i64, username);
+                info!("Owner: {}", owner.display());
+                Some(owner)
+            } else {
+                None
+            };
+
+            // Fetch trusted DM users info from Telegram
+            let mut trusted_dm_users_display = Vec::new();
+            for user_id in config.trusted_dm_users.read().unwrap().iter() {
+                let username = fetch_username(bot, user_id.0 as i64).await;
+                let user = TrustedUser::with_username(user_id.0 as i64, username);
+                info!("Trusted DM user: {}", user.display());
+                trusted_dm_users_display.push(user);
+            }
 
             let chatbot_config = ChatbotConfig {
                 primary_chat_id,
                 bot_user_id,
                 bot_username: bot_username.clone(),
-                owner_user_id,
-                trusted_dm_user_ids: config.trusted_dm_users.iter().map(|id| id.0 as i64).collect(),
+                owner,
+                trusted_dm_users: trusted_dm_users_display,
+                trusted_dm_users_shared: Some(config.trusted_dm_users.clone()),
+                config_path: Some(config.config_path.clone()),
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
                 gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
@@ -164,6 +184,21 @@ fn parse_args() -> (String, Option<String>) {
     }
 
     (config_path, system_message)
+}
+
+/// Fetch username for a user ID via Telegram API.
+/// Returns None if the user cannot be fetched (never interacted with bot).
+async fn fetch_username(bot: &Bot, user_id: i64) -> Option<String> {
+    use teloxide::requests::Requester;
+    use teloxide::types::ChatId;
+
+    match bot.get_chat(ChatId(user_id)).await {
+        Ok(chat) => chat.username().map(|s| s.to_string()),
+        Err(e) => {
+            warn!("Could not fetch user {user_id}: {e}");
+            None
+        }
+    }
 }
 
 #[tokio::main]

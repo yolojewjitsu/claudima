@@ -216,6 +216,20 @@ pub enum ToolCall {
         reminder_id: i64,
     },
 
+    // === Admin Tools (owner only) ===
+
+    /// Add a user to the trusted DM users list. Owner only.
+    AddTrustedUser {
+        /// User ID to add to trusted list
+        user_id: i64,
+    },
+
+    /// Remove a user from the trusted DM users list. Owner only.
+    RemoveTrustedUser {
+        /// User ID to remove from trusted list
+        user_id: i64,
+    },
+
     /// Do nothing - acknowledge a message without taking action.
     Noop,
 
@@ -557,6 +571,29 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["reminder_id"]
             }),
         },
+        // === Admin Tools (owner only) ===
+        Tool {
+            name: "add_trusted_user".to_string(),
+            description: "Add a user to the trusted DM users list. Only the owner can use this. After adding, the bot will restart to apply changes.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "integer", "description": "User ID to add to trusted list" }
+                },
+                "required": ["user_id"]
+            }),
+        },
+        Tool {
+            name: "remove_trusted_user".to_string(),
+            description: "Remove a user from the trusted DM users list. Only the owner can use this. After removing, the bot will restart to apply changes.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "integer", "description": "User ID to remove from trusted list" }
+                },
+                "required": ["user_id"]
+            }),
+        },
         Tool {
             name: "done".to_string(),
             description: "Signal that you're done processing. Call this when you have nothing more to do. You don't have to respond to every message - if there's nothing to say, just call done.".to_string(),
@@ -607,7 +644,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 28);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "query");
@@ -633,6 +670,8 @@ mod tests {
         assert_eq!(tools[22].name, "set_reminder");
         assert_eq!(tools[23].name, "list_reminders");
         assert_eq!(tools[24].name, "cancel_reminder");
-        assert_eq!(tools[25].name, "done");
+        assert_eq!(tools[25].name, "add_trusted_user");
+        assert_eq!(tools[26].name, "remove_trusted_user");
+        assert_eq!(tools[27].name, "done");
     }
 }

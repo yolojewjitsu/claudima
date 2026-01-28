@@ -15,7 +15,7 @@ pub mod tts;
 pub mod whisper;
 
 pub use claude_code::ClaudeCode;
-pub use engine::{system_prompt, ChatbotConfig, ChatbotEngine};
+pub use engine::{system_prompt, ChatbotConfig, ChatbotEngine, TrustedUser};
 pub use message::{ChatMessage, ReplyTo};
 pub use telegram::TelegramClient;
 pub use whisper::Whisper;
