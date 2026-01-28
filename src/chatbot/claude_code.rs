@@ -695,10 +695,7 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
                             })
                             .collect()
                     }
-                    None => {
-                        warn!("No structured output");
-                        Vec::new()
-                    }
+                    None => Vec::new()
                 };
 
                 info!("Got {} tool call(s){}", tool_calls.len(), if compacted { " (after compaction)" } else { "" });

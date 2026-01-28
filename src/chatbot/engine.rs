@@ -399,6 +399,11 @@ async fn process_messages(
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
 
         if response.tool_calls.is_empty() {
+            // For system-only messages (no real user), empty response is OK
+            if requesting_user_id.is_none() {
+                info!("System-only message batch - no response needed");
+                return Ok(());
+            }
             // No tool calls is an error - Claude must explicitly call done or another tool
             warn!("No tool calls from Claude - sending error feedback");
             response = claude
