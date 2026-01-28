@@ -574,7 +574,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         // === Admin Tools (owner only) ===
         Tool {
             name: "add_trusted_user".to_string(),
-            description: "Add a user to the trusted DM users list. Only the owner can use this. After adding, the bot will restart to apply changes.".to_string(),
+            description: "Add a user to the trusted DM users list. Only the owner can use this. Takes effect immediately (hot-reload).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -585,7 +585,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "remove_trusted_user".to_string(),
-            description: "Remove a user from the trusted DM users list. Only the owner can use this. After removing, the bot will restart to apply changes.".to_string(),
+            description: "Remove a user from the trusted DM users list. Only the owner can use this. Takes effect immediately (hot-reload).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -389,6 +389,12 @@ async fn process_messages(
     // Only apply default reply when target chat matches the source chat
     let default_reply_to = messages.last().map(|m| (m.message_id, m.chat_id));
 
+    // Get the requesting user (last non-system message sender) for authorization checks
+    let requesting_user_id = messages.iter()
+        .rev()
+        .find(|m| m.user_id != 0) // Skip system messages (user_id = 0)
+        .map(|m| m.user_id);
+
     // Tool call loop
     for iteration in 0..MAX_ITERATIONS {
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
@@ -425,7 +431,7 @@ async fn process_messages(
             }
 
             info!("🔧 Executing: {:?}", tc.call);
-            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to).await;
+            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to, requesting_user_id).await;
             if let Some(ref content) = result.content {
                 // Safely truncate to ~100 chars without breaking UTF-8
                 let truncated: String = content.chars().take(100).collect();
@@ -506,6 +512,7 @@ async fn execute_tool(
     tc: &ToolCallWithId,
     memory_files_read: &mut HashSet<String>,
     default_reply_to: Option<(i64, i64)>, // (message_id, chat_id)
+    requesting_user_id: Option<i64>,       // for authorization checks
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
@@ -637,10 +644,10 @@ async fn execute_tool(
             execute_cancel_reminder(database, *reminder_id).await
         }
         ToolCall::AddTrustedUser { user_id } => {
-            execute_add_trusted_user(config, telegram, *user_id).await
+            execute_add_trusted_user(config, telegram, *user_id, requesting_user_id).await
         }
         ToolCall::RemoveTrustedUser { user_id } => {
-            execute_remove_trusted_user(config, *user_id).await
+            execute_remove_trusted_user(config, *user_id, requesting_user_id).await
         }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
@@ -1353,38 +1360,18 @@ async fn execute_cancel_reminder(
     }
 }
 
-/// Add a user to trusted DM users (owner only).
-async fn execute_add_trusted_user(
-    config: &ChatbotConfig,
-    telegram: &TelegramClient,
-    user_id: i64,
-) -> Result<Option<String>, String> {
-    let shared = config.trusted_dm_users_shared.as_ref()
-        .ok_or("Trusted users management not configured")?;
-    let config_path = config.config_path.as_ref()
-        .ok_or("Config path not set")?;
-
-    // Check if already trusted
-    {
-        let users = shared.read().unwrap();
-        if users.contains(&UserId(user_id as u64)) {
-            return Err(format!("User {} is already in trusted list", user_id));
-        }
-    }
-
-    // Add to shared set (hot-reload)
-    {
-        let mut users = shared.write().unwrap();
-        users.insert(UserId(user_id as u64));
-    }
-
-    // Save to config file
-    let content = std::fs::read_to_string(config_path)
+/// Save trusted_dm_users to config file (preserves other fields).
+async fn save_trusted_users_to_config(
+    config_path: &std::path::Path,
+    shared: &RwLock<HashSet<UserId>>,
+) -> Result<(), String> {
+    let content = tokio::fs::read_to_string(config_path).await
         .map_err(|e| format!("Failed to read config: {e}"))?;
     let mut json: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {e}"))?;
 
-    let users: Vec<u64> = shared.read().unwrap()
+    let users: Vec<u64> = shared.read()
+        .expect("trusted_dm_users lock poisoned")
         .iter()
         .map(|u| u.0)
         .collect();
@@ -1392,8 +1379,59 @@ async fn execute_add_trusted_user(
 
     let output = serde_json::to_string_pretty(&json)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
-    std::fs::write(config_path, output)
+    tokio::fs::write(config_path, output).await
         .map_err(|e| format!("Failed to write config: {e}"))?;
+
+    Ok(())
+}
+
+/// Check if requesting user is the owner.
+fn check_owner_authorization(config: &ChatbotConfig, requesting_user_id: Option<i64>) -> Result<(), String> {
+    let owner_id = config.owner.as_ref()
+        .map(|o| o.id)
+        .ok_or("No owner configured")?;
+
+    let requester = requesting_user_id
+        .ok_or("Cannot determine requesting user")?;
+
+    if requester != owner_id {
+        return Err("Only the owner can manage trusted users".to_string());
+    }
+
+    Ok(())
+}
+
+/// Add a user to trusted DM users (owner only).
+async fn execute_add_trusted_user(
+    config: &ChatbotConfig,
+    telegram: &TelegramClient,
+    user_id: i64,
+    requesting_user_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    // Authorization check
+    check_owner_authorization(config, requesting_user_id)?;
+
+    let shared = config.trusted_dm_users_shared.as_ref()
+        .ok_or("Trusted users management not configured")?;
+    let config_path = config.config_path.as_ref()
+        .ok_or("Config path not set")?;
+
+    // Check if already trusted
+    {
+        let users = shared.read().expect("trusted_dm_users lock poisoned");
+        if users.contains(&UserId(user_id as u64)) {
+            return Err(format!("User {} is already in trusted list", user_id));
+        }
+    }
+
+    // Add to shared set (hot-reload)
+    {
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
+        users.insert(UserId(user_id as u64));
+    }
+
+    // Save to config file
+    save_trusted_users_to_config(config_path, shared).await?;
 
     info!("✅ Added trusted DM user: {}", user_id);
 
@@ -1410,7 +1448,11 @@ async fn execute_add_trusted_user(
 async fn execute_remove_trusted_user(
     config: &ChatbotConfig,
     user_id: i64,
+    requesting_user_id: Option<i64>,
 ) -> Result<Option<String>, String> {
+    // Authorization check
+    check_owner_authorization(config, requesting_user_id)?;
+
     let shared = config.trusted_dm_users_shared.as_ref()
         .ok_or("Trusted users management not configured")?;
     let config_path = config.config_path.as_ref()
@@ -1418,7 +1460,7 @@ async fn execute_remove_trusted_user(
 
     // Check if exists
     {
-        let users = shared.read().unwrap();
+        let users = shared.read().expect("trusted_dm_users lock poisoned");
         if !users.contains(&UserId(user_id as u64)) {
             return Err(format!("User {} is not in trusted list", user_id));
         }
@@ -1426,26 +1468,12 @@ async fn execute_remove_trusted_user(
 
     // Remove from shared set (hot-reload)
     {
-        let mut users = shared.write().unwrap();
+        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
         users.remove(&UserId(user_id as u64));
     }
 
     // Save to config file
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {e}"))?;
-    let mut json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
-
-    let users: Vec<u64> = shared.read().unwrap()
-        .iter()
-        .map(|u| u.0)
-        .collect();
-    json["trusted_dm_users"] = serde_json::json!(users);
-
-    let output = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("Failed to serialize config: {e}"))?;
-    std::fs::write(config_path, output)
-        .map_err(|e| format!("Failed to write config: {e}"))?;
+    save_trusted_users_to_config(config_path, shared).await?;
 
     info!("✅ Removed trusted DM user: {}", user_id);
 
