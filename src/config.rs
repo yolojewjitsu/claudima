@@ -44,7 +44,8 @@ fn default_max_strikes() -> u8 {
 }
 
 pub struct Config {
-    pub owner_ids: HashSet<UserId>,
+    /// Owner IDs - first ID is the primary owner (used for chatbot config).
+    pub owner_ids: Vec<UserId>,
     /// Users who can DM the bot but don't have owner privileges.
     /// Key = user_id, Value = optional username (for display).
     /// This is the single source of truth, shared with ChatbotConfig.
