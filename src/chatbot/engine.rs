@@ -31,6 +31,8 @@ pub struct ChatbotConfig {
     pub bot_user_id: i64,
     pub bot_username: Option<String>,
     pub owner_user_id: Option<i64>,
+    /// User IDs allowed to DM the bot (in addition to owner)
+    pub trusted_dm_user_ids: Vec<i64>,
     pub debounce_ms: u64,
     pub data_dir: Option<PathBuf>,
     pub gemini_api_key: Option<String>,
@@ -44,6 +46,7 @@ impl Default for ChatbotConfig {
             bot_user_id: 0,
             bot_username: None,
             owner_user_id: None,
+            trusted_dm_user_ids: vec![],
             debounce_ms: 1000,
             data_dir: None,
             gemini_api_key: None,
@@ -353,8 +356,9 @@ async fn process_messages(
     // Track which memory files have been read (for edit validation)
     let mut memory_files_read: HashSet<String> = HashSet::new();
 
-    // Get the last message ID for default reply-to (maintains conversation threads)
-    let default_reply_to = messages.last().map(|m| m.message_id);
+    // Get the last message ID and chat for default reply-to (maintains conversation threads)
+    // Only apply default reply when target chat matches the source chat
+    let default_reply_to = messages.last().map(|m| (m.message_id, m.chat_id));
 
     // Tool call loop
     for iteration in 0..MAX_ITERATIONS {
@@ -472,12 +476,16 @@ async fn execute_tool(
     telegram: &TelegramClient,
     tc: &ToolCallWithId,
     memory_files_read: &mut HashSet<String>,
-    default_reply_to: Option<i64>,
+    default_reply_to: Option<(i64, i64)>, // (message_id, chat_id)
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
-            // Use default_reply_to if none specified (maintains conversation threads)
-            let reply_to = reply_to_message_id.or(default_reply_to);
+            // Use default_reply_to if none specified and chat matches (maintains conversation threads)
+            let reply_to = reply_to_message_id.or_else(|| {
+                default_reply_to.and_then(|(msg_id, from_chat)| {
+                    if from_chat == *chat_id { Some(msg_id) } else { None }
+                })
+            });
             execute_send_message(config, context, database, telegram, *chat_id, text, reply_to).await
         }
         ToolCall::GetUserInfo { user_id, username } => {
@@ -530,8 +538,12 @@ async fn execute_tool(
         }
         ToolCall::SendPhoto { chat_id, prompt, caption, reply_to_message_id } => {
             // Handle specially to include image data for Claude to see
-            // Use default_reply_to if none specified (maintains conversation threads)
-            let reply_to = reply_to_message_id.or(default_reply_to);
+            // Use default_reply_to if none specified and chat matches (maintains conversation threads)
+            let reply_to = reply_to_message_id.or_else(|| {
+                default_reply_to.and_then(|(msg_id, from_chat)| {
+                    if from_chat == *chat_id { Some(msg_id) } else { None }
+                })
+            });
             match execute_send_image(config, telegram, *chat_id, prompt, caption.as_deref(), reply_to).await {
                 Ok(image_data) => {
                     return ToolResult {
@@ -552,7 +564,12 @@ async fn execute_tool(
             }
         }
         ToolCall::SendVoice { chat_id, text, voice, reply_to_message_id } => {
-            let reply_to = reply_to_message_id.or(default_reply_to);
+            // Use default_reply_to if none specified and chat matches (maintains conversation threads)
+            let reply_to = reply_to_message_id.or_else(|| {
+                default_reply_to.and_then(|(msg_id, from_chat)| {
+                    if from_chat == *chat_id { Some(msg_id) } else { None }
+                })
+            });
             execute_send_voice(config, telegram, *chat_id, text, voice.as_deref(), reply_to).await
         }
         // Memory tools
@@ -1362,10 +1379,13 @@ async fn check_reminders(
 async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
     info!("📺 Fetching YouTube info for: {}", url);
 
+    // Convert music.youtube.com URLs to regular youtube.com (oEmbed doesn't support music subdomain)
+    let normalized_url = url.replace("music.youtube.com", "www.youtube.com");
+
     // Build oEmbed URL
     let oembed_url = format!(
         "https://www.youtube.com/oembed?url={}&format=json",
-        urlencoding::encode(url)
+        urlencoding::encode(&normalized_url)
     );
 
     // Make request
@@ -1414,6 +1434,21 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
         None => "No trusted owner configured".to_string(),
     };
 
+    let dm_allowed_info = {
+        let mut allowed = vec![];
+        if let Some(id) = config.owner_user_id {
+            allowed.push(format!("{} (owner)", id));
+        }
+        for id in &config.trusted_dm_user_ids {
+            allowed.push(id.to_string());
+        }
+        if allowed.is_empty() {
+            "No one can DM you.".to_string()
+        } else {
+            format!("Users who can DM you: {}. Always respond to their DMs.", allowed.join(", "))
+        }
+    };
+
     let tools = get_tool_definitions();
     let tool_list: String = tools.iter()
         .map(|t| format!("- {}: {}", t.name, t.description))
@@ -1456,7 +1491,7 @@ IMPORTANT: Use the EXACT chat attribute value when responding with send_message.
 # When to Respond
 
 **In groups:** Respond when mentioned or replied to. Stay quiet otherwise.
-**In DMs:** Only the owner can DM you. Always respond.
+**In DMs:** {dm_allowed_info}
 
 # Before You Respond: Research the User
 

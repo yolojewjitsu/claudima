@@ -315,6 +315,9 @@ struct RawToolCall {
     reminder_id: Option<i64>,
     #[serde(default)]
     message: Option<String>,
+    // youtube_info field
+    #[serde(default)]
+    url: Option<String>,
 }
 
 impl RawToolCall {
@@ -428,8 +431,11 @@ impl RawToolCall {
                 "cancel_reminder" => Ok(ToolCall::CancelReminder {
                     reminder_id: self.reminder_id.ok_or("cancel_reminder requires reminder_id")?,
                 }),
+                "youtube_info" => Ok(ToolCall::YoutubeInfo {
+                    url: self.url.clone().ok_or("youtube_info requires url")?,
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, set_reminder, list_reminders, cancel_reminder, noop, done", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, report_bug, youtube_info, set_reminder, list_reminders, cancel_reminder, noop, done", self.tool)),
             }
         };
 

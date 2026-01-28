@@ -56,6 +56,7 @@ impl BotState {
                 bot_user_id,
                 bot_username: bot_username.clone(),
                 owner_user_id,
+                trusted_dm_user_ids: config.trusted_dm_users.iter().map(|id| id.0 as i64).collect(),
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
                 gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
@@ -243,6 +244,12 @@ async fn main() {
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![state])
         .enable_ctrlc_handler()
+        .default_handler(|upd| async move {
+            warn!("Unhandled update: {:?}", upd);
+        })
+        .error_handler(LoggingErrorHandler::with_custom_text(
+            "Error in update handler",
+        ))
         .build()
         .dispatch()
         .await;
@@ -261,7 +268,7 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
 
     // Handle DMs
     if is_private {
-        if state.config.is_owner(user.id) {
+        if state.config.can_dm(user.id) {
             info!("📨 DM from {} ({})", username, user.id);
             if let Some(ref chatbot) = state.chatbot {
                 // Download image if present

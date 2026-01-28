@@ -7,6 +7,9 @@ use teloxide::types::{ChatId, UserId};
 #[derive(Deserialize)]
 struct ConfigFile {
     owner_ids: Vec<u64>,
+    /// Users who can DM the bot but don't have owner privileges
+    #[serde(default)]
+    trusted_dm_users: Vec<u64>,
     telegram_bot_token: String,
     /// OpenRouter API key for spam classification
     #[serde(default)]
@@ -41,6 +44,8 @@ fn default_max_strikes() -> u8 {
 
 pub struct Config {
     pub owner_ids: HashSet<UserId>,
+    /// Users who can DM the bot but don't have owner privileges
+    pub trusted_dm_users: HashSet<UserId>,
     pub telegram_bot_token: String,
     pub openrouter_api_key: String,
     pub gemini_api_key: String,
@@ -65,6 +70,7 @@ impl Config {
         let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
 
         let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
+        let trusted_dm_users = file.trusted_dm_users.into_iter().map(UserId).collect();
         let allowed_groups = file.allowed_groups.into_iter().map(ChatId).collect();
         let trusted_channels = file.trusted_channels.into_iter().map(ChatId).collect();
 
@@ -93,6 +99,7 @@ impl Config {
 
         Self {
             owner_ids,
+            trusted_dm_users,
             telegram_bot_token: file.telegram_bot_token,
             openrouter_api_key: file.openrouter_api_key,
             gemini_api_key: file.gemini_api_key,
@@ -111,6 +118,11 @@ impl Config {
 
     pub fn is_owner(&self, user_id: UserId) -> bool {
         self.owner_ids.contains(&user_id)
+    }
+
+    /// Check if user can DM the bot (owners + trusted DM users)
+    pub fn can_dm(&self, user_id: UserId) -> bool {
+        self.owner_ids.contains(&user_id) || self.trusted_dm_users.contains(&user_id)
     }
 
     pub fn is_trusted_channel(&self, chat_id: ChatId) -> bool {

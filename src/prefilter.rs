@@ -43,6 +43,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             owner_ids: std::collections::HashSet::from([teloxide::types::UserId(1)]),
+            trusted_dm_users: std::collections::HashSet::new(),
             telegram_bot_token: String::new(),
             openrouter_api_key: String::new(),
             gemini_api_key: String::new(),
