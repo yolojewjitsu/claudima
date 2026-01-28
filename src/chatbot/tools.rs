@@ -582,23 +582,23 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         // === Admin Tools (owner only, DM only) ===
         Tool {
             name: "add_trusted_user".to_string(),
-            description: "Add a user to the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username (without @).".to_string(),
+            description: "Add a user to the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "user_id": { "type": "integer", "description": "User ID to add (optional if username provided)" },
-                    "username": { "type": "string", "description": "Username to add without @ (optional if user_id provided)" }
+                    "username": { "type": "string", "description": "Username to add, with or without @ (optional if user_id provided)" }
                 }
             }),
         },
         Tool {
             name: "remove_trusted_user".to_string(),
-            description: "Remove a user from the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username (without @).".to_string(),
+            description: "Remove a user from the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "user_id": { "type": "integer", "description": "User ID to remove (optional if username provided)" },
-                    "username": { "type": "string", "description": "Username to remove without @ (optional if user_id provided)" }
+                    "username": { "type": "string", "description": "Username to remove, with or without @ (optional if user_id provided)" }
                 }
             }),
         },

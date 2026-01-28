@@ -1378,7 +1378,10 @@ async fn save_trusted_users_to_config(
     let users: Vec<u64> = trusted_dm_users.read()
         .expect("trusted_dm_users lock poisoned")
         .keys()
-        .map(|&id| id as u64)
+        .map(|&id| {
+            debug_assert!(id >= 0, "user_id should never be negative");
+            id as u64
+        })
         .collect();
     json["trusted_dm_users"] = serde_json::json!(users);
 
@@ -1473,20 +1476,15 @@ async fn execute_add_trusted_user(
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check if already in list (without modifying yet)
+    // Fetch username for display (before taking write lock)
+    let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
+
+    // Check and add in single write lock scope to avoid TOCTOU race
     {
-        let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
         if users.contains_key(&resolved_id) {
             return Err(format!("User {} is already in trusted list", resolved_id));
         }
-    }
-
-    // Fetch username for display (before modifying state)
-    let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
-
-    // Add to the single source of truth
-    {
-        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
         users.insert(resolved_id, fetched_username.clone());
     }
 
@@ -1527,7 +1525,7 @@ async fn execute_remove_trusted_user(
                 let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
                 users.iter()
                     .find(|(id, uname)| {
-                        uname.as_ref().map(|n| n.to_lowercase()) == Some(name_clean.clone())
+                        uname.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(&name_clean))
                             || id.to_string() == name_clean
                     })
                     .map(|(&id, _)| id)
@@ -1572,9 +1570,10 @@ async fn execute_remove_trusted_user(
         return Err(e);
     }
 
-    info!("✅ Removed trusted DM user: {}", resolved_id);
+    let user_display = format_trusted_user(resolved_id, old_username.as_deref());
+    info!("✅ Removed trusted DM user: {}", user_display);
 
-    Ok(Some(format!("Removed user {} from trusted DM users.", resolved_id)))
+    Ok(Some(format!("Removed {} from trusted DM users.", user_display)))
 }
 
 /// Check and fire due reminders.
