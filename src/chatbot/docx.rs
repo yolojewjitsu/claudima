@@ -190,14 +190,14 @@ mod tests {
 
     #[test]
     fn test_extract_text_from_xml_simple() {
-        let xml = r#"<w:document><w:body><w:p><w:r><w:t>Hello World</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml = r"<w:document><w:body><w:p><w:r><w:t>Hello World</w:t></w:r></w:p></w:body></w:document>";
         let text = extract_text_from_xml(xml);
         assert_eq!(text, "Hello World");
     }
 
     #[test]
     fn test_extract_text_from_xml_multiple_paragraphs() {
-        let xml = r#"<w:document><w:body><w:p><w:r><w:t>First paragraph</w:t></w:r></w:p><w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml = r"<w:document><w:body><w:p><w:r><w:t>First paragraph</w:t></w:r></w:p><w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p></w:body></w:document>";
         let text = extract_text_from_xml(xml);
         assert!(text.contains("First paragraph"));
         assert!(text.contains("Second paragraph"));
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_extract_text_from_xml_with_entities() {
-        let xml = r#"<w:document><w:body><w:p><w:r><w:t>A &lt; B &amp; C &gt; D</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml = r"<w:document><w:body><w:p><w:r><w:t>A &lt; B &amp; C &gt; D</w:t></w:r></w:p></w:body></w:document>";
         let text = extract_text_from_xml(xml);
         assert_eq!(text, "A < B & C > D");
     }

@@ -106,7 +106,7 @@ impl ChatbotEngine {
 
         // Load context (for message lookups, not for sending to Claude)
         let context = if let Some(ref path) = context_path {
-            ContextBuffer::load_or_new(path, 50000)
+            ContextBuffer::load_or_new(path)
         } else {
             ContextBuffer::new()
         };
@@ -823,10 +823,12 @@ async fn execute_delete_message(
     telegram.delete_message(chat_id, message_id).await?;
 
     // Notify owner
-    if let Some(owner) = &config.owner {
-        let _ = telegram
+    if let Some(owner) = &config.owner
+        && let Err(e) = telegram
             .send_message(owner.id, &format!("🗑️ Deleted message {} in chat {}", message_id, chat_id), None)
-            .await;
+            .await
+    {
+        warn!("Failed to notify owner of delete: {e}");
     }
 
     Ok(None) // Action tool
@@ -846,10 +848,12 @@ async fn execute_mute_user(
     telegram.mute_user(chat_id, user_id, duration).await?;
 
     // Notify owner
-    if let Some(owner) = &config.owner {
-        let _ = telegram
+    if let Some(owner) = &config.owner
+        && let Err(e) = telegram
             .send_message(owner.id, &format!("🔇 Muted user {} for {} min in chat {}", user_id, duration, chat_id), None)
-            .await;
+            .await
+    {
+        warn!("Failed to notify owner of mute: {e}");
     }
 
     Ok(None) // Action tool
@@ -865,10 +869,12 @@ async fn execute_ban_user(
     telegram.ban_user(chat_id, user_id).await?;
 
     // Notify owner
-    if let Some(owner) = &config.owner {
-        let _ = telegram
+    if let Some(owner) = &config.owner
+        && let Err(e) = telegram
             .send_message(owner.id, &format!("🚫 Banned user {} from chat {}", user_id, chat_id), None)
-            .await;
+            .await
+    {
+        warn!("Failed to notify owner of ban: {e}");
     }
 
     Ok(None) // Action tool
@@ -884,10 +890,12 @@ async fn execute_kick_user(
     telegram.kick_user(chat_id, user_id).await?;
 
     // Notify owner
-    if let Some(owner) = &config.owner {
-        let _ = telegram
+    if let Some(owner) = &config.owner
+        && let Err(e) = telegram
             .send_message(owner.id, &format!("👢 Kicked user {} from chat {}", user_id, chat_id), None)
-            .await;
+            .await
+    {
+        warn!("Failed to notify owner of kick: {e}");
     }
 
     Ok(None) // Action tool
@@ -1613,7 +1621,9 @@ async fn check_reminders(
                 Err(e) => {
                     warn!("Failed to calculate next trigger for reminder #{}: {}", reminder.id, e);
                     // Mark as completed since we can't reschedule
-                    let _ = db.mark_reminder_completed(reminder.id);
+                    if let Err(e2) = db.mark_reminder_completed(reminder.id) {
+                        warn!("Failed to mark reminder #{} completed: {}", reminder.id, e2);
+                    }
                 }
             }
         } else {
@@ -1669,85 +1679,6 @@ async fn execute_youtube_info(url: &str) -> Result<Option<String>, String> {
     );
 
     Ok(Some(result))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_config_with_owner(owner_id: i64) -> ChatbotConfig {
-        ChatbotConfig {
-            owner: Some(TrustedUser::with_username(owner_id, Some("testowner".to_string()))),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_format_trusted_user_with_username() {
-        let result = format_trusted_user(12345, Some("alice"));
-        assert_eq!(result, "@alice (12345)");
-    }
-
-    #[test]
-    fn test_format_trusted_user_without_username() {
-        let result = format_trusted_user(12345, None);
-        assert_eq!(result, "12345");
-    }
-
-    #[test]
-    fn test_trusted_user_display_with_username() {
-        let user = TrustedUser::with_username(12345, Some("bob".to_string()));
-        assert_eq!(user.display(), "@bob (12345)");
-    }
-
-    #[test]
-    fn test_trusted_user_display_without_username() {
-        let user = TrustedUser::with_username(12345, None);
-        assert_eq!(user.display(), "12345");
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_success() {
-        let config = test_config_with_owner(123);
-        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_no_owner() {
-        let config = ChatbotConfig::default();
-        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
-        assert_eq!(result.unwrap_err(), "No owner configured");
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_not_owner() {
-        let config = test_config_with_owner(123);
-        let result = check_owner_dm_authorization(&config, Some(456), Some(456));
-        assert_eq!(result.unwrap_err(), "Only the owner can manage trusted users");
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_not_in_dm() {
-        let config = test_config_with_owner(123);
-        // Owner (123) in a group chat (-999)
-        let result = check_owner_dm_authorization(&config, Some(123), Some(-999));
-        assert_eq!(result.unwrap_err(), "This command only works in DM with the bot");
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_missing_user() {
-        let config = test_config_with_owner(123);
-        let result = check_owner_dm_authorization(&config, None, Some(123));
-        assert_eq!(result.unwrap_err(), "Cannot determine requesting user");
-    }
-
-    #[test]
-    fn test_check_owner_dm_authorization_missing_chat() {
-        let config = test_config_with_owner(123);
-        let result = check_owner_dm_authorization(&config, Some(123), None);
-        assert_eq!(result.unwrap_err(), "Cannot determine chat");
-    }
 }
 
 /// Generate system prompt.
@@ -2057,4 +1988,83 @@ ALWAYS include {{"tool": "done"}} as the LAST item.
 Telegram HTML only: b, strong, i, em, u, s, code, pre, a.
 NEVER use <cite> tags - strip them from any web search results.
 "#)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config_with_owner(owner_id: i64) -> ChatbotConfig {
+        ChatbotConfig {
+            owner: Some(TrustedUser::with_username(owner_id, Some("testowner".to_string()))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_format_trusted_user_with_username() {
+        let result = format_trusted_user(12345, Some("alice"));
+        assert_eq!(result, "@alice (12345)");
+    }
+
+    #[test]
+    fn test_format_trusted_user_without_username() {
+        let result = format_trusted_user(12345, None);
+        assert_eq!(result, "12345");
+    }
+
+    #[test]
+    fn test_trusted_user_display_with_username() {
+        let user = TrustedUser::with_username(12345, Some("bob".to_string()));
+        assert_eq!(user.display(), "@bob (12345)");
+    }
+
+    #[test]
+    fn test_trusted_user_display_without_username() {
+        let user = TrustedUser::with_username(12345, None);
+        assert_eq!(user.display(), "12345");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_success() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_no_owner() {
+        let config = ChatbotConfig::default();
+        let result = check_owner_dm_authorization(&config, Some(123), Some(123));
+        assert_eq!(result.unwrap_err(), "No owner configured");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_owner() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(456), Some(456));
+        assert_eq!(result.unwrap_err(), "Only the owner can manage trusted users");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_not_in_dm() {
+        let config = test_config_with_owner(123);
+        // Owner (123) in a group chat (-999)
+        let result = check_owner_dm_authorization(&config, Some(123), Some(-999));
+        assert_eq!(result.unwrap_err(), "This command only works in DM with the bot");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_user() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, None, Some(123));
+        assert_eq!(result.unwrap_err(), "Cannot determine requesting user");
+    }
+
+    #[test]
+    fn test_check_owner_dm_authorization_missing_chat() {
+        let config = test_config_with_owner(123);
+        let result = check_owner_dm_authorization(&config, Some(123), None);
+        assert_eq!(result.unwrap_err(), "Cannot determine chat");
+    }
 }

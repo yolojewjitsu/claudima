@@ -80,7 +80,7 @@ mod tests {
         let now = Utc::now();
         let result = parse_trigger_time("+30m").unwrap();
         let diff = (result - now).num_minutes();
-        assert!(diff >= 29 && diff <= 31);
+        assert!((29..=31).contains(&diff));
     }
 
     #[test]
@@ -88,7 +88,7 @@ mod tests {
         let now = Utc::now();
         let result = parse_trigger_time("+2h").unwrap();
         let diff = (result - now).num_hours();
-        assert!(diff >= 1 && diff <= 2);
+        assert!((1..=2).contains(&diff));
     }
 
     #[test]
@@ -96,7 +96,7 @@ mod tests {
         let now = Utc::now();
         let result = parse_trigger_time("+1d").unwrap();
         let diff = (result - now).num_days();
-        assert!(diff >= 0 && diff <= 1);
+        assert!((0..=1).contains(&diff));
     }
 
     #[test]
