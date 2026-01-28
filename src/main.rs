@@ -61,21 +61,27 @@ impl BotState {
                 None
             };
 
-            // Fetch trusted DM users info from Telegram
+            // Fetch trusted DM users' usernames from Telegram and update the HashMap
             // Collect IDs first to avoid holding lock across await
             let trusted_ids: Vec<i64> = config.trusted_dm_users
                 .read()
                 .expect("trusted_dm_users lock poisoned")
-                .iter()
-                .map(|u| u.0 as i64)
+                .keys()
+                .copied()
                 .collect();
 
-            let mut trusted_dm_users_display = Vec::new();
             for user_id in trusted_ids {
                 let username = telegram.get_chat_username(user_id).await.ok().flatten();
-                let user = TrustedUser::with_username(user_id, username);
-                info!("Trusted DM user: {}", user.display());
-                trusted_dm_users_display.push(user);
+                // Update the HashMap with the fetched username
+                {
+                    let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+                    users.insert(user_id, username.clone());
+                }
+                let user_display = match &username {
+                    Some(u) => format!("@{} ({})", u, user_id),
+                    None => user_id.to_string(),
+                };
+                info!("Trusted DM user: {}", user_display);
             }
 
             let chatbot_config = ChatbotConfig {
@@ -83,8 +89,7 @@ impl BotState {
                 bot_user_id,
                 bot_username: bot_username.clone(),
                 owner,
-                trusted_dm_users: Arc::new(std::sync::RwLock::new(trusted_dm_users_display)),
-                trusted_dm_users_shared: Some(config.trusted_dm_users.clone()),
+                trusted_dm_users: config.trusted_dm_users.clone(),
                 config_path: Some(config.config_path.clone()),
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),

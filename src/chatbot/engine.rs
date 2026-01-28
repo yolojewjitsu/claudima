@@ -1,11 +1,10 @@
 //! Chatbot engine - relays Telegram messages to Claude Code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use teloxide::types::UserId;
 use tracing::{debug, error, info, warn};
 
 use crate::chatbot::claude_code::{ClaudeCode, ToolCallWithId, ToolResult};
@@ -54,10 +53,10 @@ pub struct ChatbotConfig {
     pub bot_username: Option<String>,
     /// The bot owner
     pub owner: Option<TrustedUser>,
-    /// Users allowed to DM the bot (in addition to owner) - for display in system prompt (shared for hot-reload)
-    pub trusted_dm_users: Arc<RwLock<Vec<TrustedUser>>>,
-    /// Shared set of trusted user IDs for authorization hot-reload (same Arc as Config)
-    pub trusted_dm_users_shared: Option<Arc<RwLock<HashSet<UserId>>>>,
+    /// Users allowed to DM the bot (in addition to owner).
+    /// Key = user_id, Value = optional username.
+    /// Single source of truth shared with Config for hot-reload.
+    pub trusted_dm_users: Arc<RwLock<HashMap<i64, Option<String>>>>,
     /// Path to config file for saving changes
     pub config_path: Option<PathBuf>,
     pub debounce_ms: u64,
@@ -73,8 +72,7 @@ impl Default for ChatbotConfig {
             bot_user_id: 0,
             bot_username: None,
             owner: None,
-            trusted_dm_users: Arc::new(RwLock::new(vec![])),
-            trusted_dm_users_shared: None,
+            trusted_dm_users: Arc::new(RwLock::new(HashMap::new())),
             config_path: None,
             debounce_ms: 1000,
             data_dir: None,
@@ -1370,17 +1368,17 @@ async fn execute_cancel_reminder(
 /// Save trusted_dm_users to config file (preserves other fields).
 async fn save_trusted_users_to_config(
     config_path: &std::path::Path,
-    shared: &RwLock<HashSet<UserId>>,
+    trusted_dm_users: &RwLock<HashMap<i64, Option<String>>>,
 ) -> Result<(), String> {
     let content = tokio::fs::read_to_string(config_path).await
         .map_err(|e| format!("Failed to read config: {e}"))?;
     let mut json: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {e}"))?;
 
-    let users: Vec<u64> = shared.read()
+    let users: Vec<u64> = trusted_dm_users.read()
         .expect("trusted_dm_users lock poisoned")
-        .iter()
-        .map(|u| u.0)
+        .keys()
+        .map(|&id| id as u64)
         .collect();
     json["trusted_dm_users"] = serde_json::json!(users);
 
@@ -1390,6 +1388,14 @@ async fn save_trusted_users_to_config(
         .map_err(|e| format!("Failed to write config: {e}"))?;
 
     Ok(())
+}
+
+/// Format a trusted user for display: "@username (id)" or just "id".
+fn format_trusted_user(user_id: i64, username: Option<&str>) -> String {
+    match username {
+        Some(u) => format!("@{} ({})", u, user_id),
+        None => user_id.to_string(),
+    }
 }
 
 /// Check if requesting user is the owner AND this is a DM with the owner.
@@ -1464,44 +1470,36 @@ async fn execute_add_trusted_user(
         return Err("Owner is already trusted by default".to_string());
     }
 
-    let shared = config.trusted_dm_users_shared.as_ref()
-        .ok_or("Trusted users management not configured")?;
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
     // Check if already in list (without modifying yet)
     {
-        let users = shared.read().expect("trusted_dm_users lock poisoned");
-        if users.contains(&UserId(resolved_id as u64)) {
+        let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+        if users.contains_key(&resolved_id) {
             return Err(format!("User {} is already in trusted list", resolved_id));
         }
     }
 
     // Fetch username for display (before modifying state)
     let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
-    let trusted_user = TrustedUser::with_username(resolved_id, fetched_username.clone());
 
-    // Add to auth list
+    // Add to the single source of truth
     {
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        users.insert(UserId(resolved_id as u64));
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.insert(resolved_id, fetched_username.clone());
     }
 
     // Save to config file - rollback on failure
-    if let Err(e) = save_trusted_users_to_config(config_path, shared).await {
-        // Rollback: remove from auth list
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        users.remove(&UserId(resolved_id as u64));
+    if let Err(e) = save_trusted_users_to_config(config_path, &config.trusted_dm_users).await {
+        // Rollback: remove from list
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.remove(&resolved_id);
         return Err(e);
     }
 
-    // Update display list for system prompt (only after successful save)
-    {
-        let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
-        display_users.push(trusted_user.clone());
-    }
-
-    info!("✅ Added trusted DM user: {}", trusted_user.display());
+    let user_display = format_trusted_user(resolved_id, fetched_username.as_deref());
+    info!("✅ Added trusted DM user: {}", user_display);
 
     let username_str = fetched_username.map(|u| format!(" (@{})", u)).unwrap_or_default();
     Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", resolved_id, username_str)))
@@ -1523,16 +1521,19 @@ async fn execute_remove_trusted_user(
     let resolved_id = match (user_id, username) {
         (Some(id), _) => id,
         (None, Some(name)) => {
-            // For removal, check the display list first (no await needed)
+            // For removal, check the trusted list first (no await needed)
             let name_clean = name.trim_start_matches('@').to_lowercase();
-            let found_in_display = {
-                let display_users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
-                display_users.iter().find(|u| {
-                    u.username.as_ref().map(|n| n.to_lowercase()) == Some(name_clean.clone())
-                }).map(|u| u.id)
+            let found_in_list = {
+                let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+                users.iter()
+                    .find(|(id, uname)| {
+                        uname.as_ref().map(|n| n.to_lowercase()) == Some(name_clean.clone())
+                            || id.to_string() == name_clean
+                    })
+                    .map(|(&id, _)| id)
             };
 
-            if let Some(id) = found_in_display {
+            if let Some(id) = found_in_list {
                 id
             } else {
                 // Fall back to database lookup
@@ -1545,37 +1546,30 @@ async fn execute_remove_trusted_user(
         (None, None) => return Err("Must provide user_id or username".to_string()),
     };
 
-    let shared = config.trusted_dm_users_shared.as_ref()
-        .ok_or("Trusted users management not configured")?;
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check if in list (without modifying yet)
-    {
-        let users = shared.read().expect("trusted_dm_users lock poisoned");
-        if !users.contains(&UserId(resolved_id as u64)) {
-            return Err(format!("User {} is not in trusted list", resolved_id));
+    // Check if in list and get username for rollback
+    let old_username = {
+        let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+        match users.get(&resolved_id) {
+            Some(uname) => uname.clone(),
+            None => return Err(format!("User {} is not in trusted list", resolved_id)),
         }
-    }
+    };
 
-    // Remove from auth list
+    // Remove from the single source of truth
     {
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        users.remove(&UserId(resolved_id as u64));
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.remove(&resolved_id);
     }
 
     // Save to config file - rollback on failure
-    if let Err(e) = save_trusted_users_to_config(config_path, shared).await {
-        // Rollback: re-add to auth list
-        let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        users.insert(UserId(resolved_id as u64));
+    if let Err(e) = save_trusted_users_to_config(config_path, &config.trusted_dm_users).await {
+        // Rollback: re-add with old username
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        users.insert(resolved_id, old_username);
         return Err(e);
-    }
-
-    // Update display list for system prompt (only after successful save)
-    {
-        let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
-        display_users.retain(|u| u.id != resolved_id);
     }
 
     info!("✅ Removed trusted DM user: {}", resolved_id);
@@ -1704,8 +1698,8 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
         if let Some(owner) = &config.owner {
             allowed.push(format!("{} (owner)", owner.display()));
         }
-        for user in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
-            allowed.push(user.display());
+        for (&user_id, username) in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
+            allowed.push(format_trusted_user(user_id, username.as_deref()));
         }
         if allowed.is_empty() {
             "No one can DM you.".to_string()

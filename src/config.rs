@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use teloxide::types::{ChatId, UserId};
@@ -45,8 +45,10 @@ fn default_max_strikes() -> u8 {
 
 pub struct Config {
     pub owner_ids: HashSet<UserId>,
-    /// Users who can DM the bot but don't have owner privileges (shared for hot-reload)
-    pub trusted_dm_users: Arc<RwLock<HashSet<UserId>>>,
+    /// Users who can DM the bot but don't have owner privileges.
+    /// Key = user_id, Value = optional username (for display).
+    /// This is the single source of truth, shared with ChatbotConfig.
+    pub trusted_dm_users: Arc<RwLock<HashMap<i64, Option<String>>>>,
     /// Path to the config file (for saving changes)
     pub config_path: PathBuf,
     pub telegram_bot_token: String,
@@ -74,8 +76,11 @@ impl Config {
         let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
 
         let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
+        // Initialize with None usernames - main.rs will fetch from Telegram
         let trusted_dm_users = Arc::new(RwLock::new(
-            file.trusted_dm_users.into_iter().map(UserId).collect()
+            file.trusted_dm_users.into_iter()
+                .map(|id| (id as i64, None))
+                .collect()
         ));
         let allowed_groups = file.allowed_groups.into_iter().map(ChatId).collect();
         let trusted_channels = file.trusted_channels.into_iter().map(ChatId).collect();
@@ -130,7 +135,9 @@ impl Config {
     /// Check if user can DM the bot (owners + trusted DM users)
     pub fn can_dm(&self, user_id: UserId) -> bool {
         self.owner_ids.contains(&user_id)
-            || self.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").contains(&user_id)
+            || self.trusted_dm_users.read()
+                .expect("trusted_dm_users lock poisoned")
+                .contains_key(&(user_id.0 as i64))
     }
 
     pub fn is_trusted_channel(&self, chat_id: ChatId) -> bool {
