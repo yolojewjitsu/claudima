@@ -1538,7 +1538,7 @@ async fn execute_remove_trusted_user(
                 let db = database.lock().await;
                 db.find_user_by_username(&name_clean)
                     .map(|m| m.user_id)
-                    .ok_or_else(|| format!("User @{} not found", name))?
+                    .ok_or_else(|| format!("User @{} not found.", name))?
             }
         }
         (None, None) => return Err("Must provide user_id or username".to_string()),
@@ -1547,20 +1547,14 @@ async fn execute_remove_trusted_user(
     let config_path = config.config_path.as_ref()
         .ok_or("Config path not set")?;
 
-    // Check if in list and get username for rollback
+    // Check and remove in single write lock scope (avoids TOCTOU race)
     let old_username = {
-        let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
-        match users.get(&resolved_id) {
-            Some(uname) => uname.clone(),
-            None => return Err(format!("User {} is not in trusted list", resolved_id)),
+        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
+        match users.remove(&resolved_id) {
+            Some(uname) => uname,
+            None => return Err(format!("User {} is not in trusted list.", resolved_id)),
         }
     };
-
-    // Remove from the single source of truth
-    {
-        let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
-        users.remove(&resolved_id);
-    }
 
     // Save to config file - rollback on failure
     if let Err(e) = save_trusted_users_to_config(config_path, &config.trusted_dm_users).await {
