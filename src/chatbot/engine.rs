@@ -1444,7 +1444,7 @@ async fn resolve_username_to_id(
         return Ok(member.user_id);
     }
 
-    Err(format!("User @{} not found. They need to have sent at least one message in the group.", username))
+    Err(format!("User @{} not found (they must have sent at least one message in the group)", username))
 }
 
 /// Add a user to trusted DM users (owner only, DM only).
@@ -1520,12 +1520,12 @@ async fn execute_remove_trusted_user(
         (Some(id), _) => id,
         (None, Some(name)) => {
             // For removal, check the trusted list first (no await needed)
-            let name_clean = name.trim_start_matches('@').to_lowercase();
+            let name_clean = name.trim_start_matches('@');
             let found_in_list = {
                 let users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
                 users.iter()
                     .find(|(id, uname)| {
-                        uname.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(&name_clean))
+                        uname.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(name_clean))
                             || id.to_string() == name_clean
                     })
                     .map(|(&id, _)| id)
@@ -1536,9 +1536,9 @@ async fn execute_remove_trusted_user(
             } else {
                 // Fall back to database lookup
                 let db = database.lock().await;
-                db.find_user_by_username(&name_clean)
+                db.find_user_by_username(name_clean)
                     .map(|m| m.user_id)
-                    .ok_or_else(|| format!("User @{} not found.", name))?
+                    .ok_or_else(|| format!("User @{} not found", name))?
             }
         }
         (None, None) => return Err("Must provide user_id or username".to_string()),
@@ -1552,7 +1552,7 @@ async fn execute_remove_trusted_user(
         let mut users = config.trusted_dm_users.write().expect("trusted_dm_users lock poisoned");
         match users.remove(&resolved_id) {
             Some(uname) => uname,
-            None => return Err(format!("User {} is not in trusted list.", resolved_id)),
+            None => return Err(format!("User {} is not in trusted list", resolved_id)),
         }
     };
 
