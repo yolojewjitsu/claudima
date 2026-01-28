@@ -79,7 +79,7 @@ impl Database {
     fn init_schema(&self) {
         let conn = self.conn.lock().unwrap();
 
-        conn.execute_batch(r#"
+        conn.execute_batch(r"
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -120,7 +120,7 @@ impl Database {
                 active INTEGER DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_reminders_active ON reminders(trigger_at) WHERE active = 1;
-        "#).expect("Failed to initialize database schema");
+        ").expect("Failed to initialize database schema");
     }
 
     fn get_counts(&self) -> (usize, usize) {

@@ -101,7 +101,7 @@ impl ContextBuffer {
         Ok(buffer)
     }
 
-    pub fn load_or_new(path: &Path, _threshold: usize) -> Self {
+    pub fn load_or_new(path: &Path) -> Self {
         if path.exists() {
             match Self::load(path) {
                 Ok(buffer) => buffer,

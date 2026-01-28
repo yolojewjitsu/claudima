@@ -14,15 +14,11 @@ pub struct Message {
 #[derive(Debug, Clone, Copy)]
 pub enum Role {
     User,
-    #[allow(dead_code)]
-    Assistant,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Model {
     Haiku,
-    #[allow(dead_code)]
-    Sonnet,
 }
 
 impl Model {
@@ -30,7 +26,6 @@ impl Model {
         match self {
             // OpenRouter model IDs
             Model::Haiku => "anthropic/claude-3-haiku",
-            Model::Sonnet => "anthropic/claude-3.5-sonnet",
         }
     }
 }
@@ -83,7 +78,6 @@ impl Client {
             .map(|m| ApiMessage {
                 role: match m.role {
                     Role::User => "user",
-                    Role::Assistant => "assistant",
                 },
                 content: m.content.clone(),
             })
