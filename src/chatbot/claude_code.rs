@@ -237,7 +237,21 @@ enum OutputMessage {
 #[derive(Debug, Deserialize)]
 struct AssistantMessage {
     #[serde(default)]
+    content: Vec<ContentBlock>,
+    #[serde(default)]
     context_management: Option<ContextManagement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ContentBlock {
+    #[serde(rename = "text")]
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(other)]
+    Other,
 }
 
 /// Context management info from compaction.
@@ -464,14 +478,20 @@ fn save_session_id(path: &Path, session_id: &str) {
     }
 }
 
-fn worker_loop(
-    system_prompt: String,
-    resume_session: Option<String>,
-    session_file: Option<PathBuf>,
-    mut msg_rx: mpsc::Receiver<WorkerMessage>,
-    resp_tx: mpsc::Sender<Response>,
-) -> Result<(), String> {
-    let mut process = spawn_process(resume_session.as_deref())?;
+/// A running Claude Code session with stdin and output channel.
+struct Session {
+    process: Child,
+    stdin: ChildStdin,
+    out_rx: mpsc::Receiver<OutputMessage>,
+    session_id: Option<String>,
+}
+
+/// Start a Claude Code session (fresh or resumed).
+fn start_session(
+    system_prompt: &str,
+    resume_session: Option<&str>,
+) -> Result<Session, String> {
+    let mut process = spawn_process(resume_session)?;
     let mut stdin = process.stdin.take().ok_or("No stdin")?;
     let stdout = process.stdout.take().ok_or("No stdout")?;
 
@@ -506,22 +526,19 @@ fn worker_loop(
         }
     });
 
-    // Send first message to trigger Claude Code output
-    // Claude Code only outputs after receiving input
-    let is_resumed = resume_session.is_some();
-    let first_message = if is_resumed {
+    // Send first message
+    let first_message = if resume_session.is_some() {
         "Session resumed. Ready for new messages.".to_string()
     } else {
-        system_prompt.clone()
+        system_prompt.to_string()
     };
     send_message(&mut stdin, &first_message)?;
 
-    // Now wait for system message (comes first in output)
+    // Wait for system message
     let mut session_id: Option<String> = None;
     loop {
         match out_rx.blocking_recv() {
             Some(OutputMessage::System { tools, session_id: sid }) => {
-                // Allow only StructuredOutput and WebSearch
                 let allowed = ["StructuredOutput", "WebSearch"];
                 let unexpected: Vec<_> = tools.iter().filter(|t| !allowed.contains(&t.as_str())).collect();
                 if !unexpected.is_empty() {
@@ -547,8 +564,20 @@ fn worker_loop(
     }
     info!("First message processed, ready for chat");
 
-    // Save session ID if we have one and a file path
-    if let (Some(sid), Some(path)) = (&session_id, &session_file) {
+    Ok(Session { process, stdin, out_rx, session_id })
+}
+
+fn worker_loop(
+    system_prompt: String,
+    resume_session: Option<String>,
+    session_file: Option<PathBuf>,
+    mut msg_rx: mpsc::Receiver<WorkerMessage>,
+    resp_tx: mpsc::Sender<Response>,
+) -> Result<(), String> {
+    let mut session = start_session(&system_prompt, resume_session.as_deref())?;
+
+    // Save session ID if we have one
+    if let (Some(sid), Some(path)) = (&session.session_id, &session_file) {
         save_session_id(path, sid);
     }
 
@@ -556,24 +585,60 @@ fn worker_loop(
     while let Some(msg) = msg_rx.blocking_recv() {
         match msg {
             WorkerMessage::UserMessage(content) => {
-                send_message(&mut stdin, &content)?;
+                send_message(&mut session.stdin, &content)?;
             }
             WorkerMessage::ImageMessage(text, image_data, media_type) => {
-                send_message_with_image(&mut stdin, &text, &image_data, &media_type)?;
+                send_message_with_image(&mut session.stdin, &text, &image_data, &media_type)?;
             }
             WorkerMessage::ToolResults(results) => {
                 let content = format_tool_results(&results);
-                send_message(&mut stdin, &content)?;
+                send_message(&mut session.stdin, &content)?;
             }
         }
 
-        let (response, new_sid) = wait_for_result(&mut out_rx)?;
+        let result = wait_for_result(&mut session.out_rx);
+
+        // Handle session overflow by restarting with fresh session
+        if let Err(ref e) = result
+            && e == "REQUEST_TOO_LARGE"
+        {
+            warn!("🔄 Session context overflow - restarting with fresh session");
+
+            // Kill old process
+            drop(session.stdin);
+            let _ = session.process.kill();
+            let _ = session.process.wait();
+
+            // Delete session file to prevent resuming the broken session
+            if let Some(ref path) = session_file {
+                if let Err(e) = std::fs::remove_file(path) {
+                    warn!("Failed to delete session file: {}", e);
+                }
+            }
+
+            // Start fresh session (no resume)
+            session = start_session(&system_prompt, None)?;
+
+            if let (Some(sid), Some(path)) = (&session.session_id, &session_file) {
+                save_session_id(path, sid);
+            }
+
+            // Send an empty response for the failed message
+            // The caller will see 0 tool calls and handle it
+            let empty = Response { tool_calls: vec![], compacted: false };
+            if resp_tx.blocking_send(empty).is_err() {
+                break;
+            }
+            continue;
+        }
+
+        let (response, new_sid) = result?;
 
         // Update session ID if changed
         if let Some(sid) = new_sid
-            && session_id.as_ref() != Some(&sid)
+            && session.session_id.as_ref() != Some(&sid)
         {
-            session_id = Some(sid.clone());
+            session.session_id = Some(sid.clone());
             if let Some(ref path) = session_file {
                 save_session_id(path, &sid);
             }
@@ -585,8 +650,8 @@ fn worker_loop(
     }
 
     info!("Claude Code worker shutting down");
-    drop(stdin);
-    let _ = process.wait();
+    drop(session.stdin);
+    let _ = session.process.wait();
     Ok(())
 }
 
@@ -672,13 +737,27 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
     loop {
         match out_rx.blocking_recv() {
             Some(OutputMessage::Assistant { message }) => {
-                // Check for context compaction
-                if let Some(msg) = message
-                    && let Some(ctx) = msg.context_management
-                    && ctx.truncated_content_length.is_some()
-                {
-                    warn!("Context compaction detected!");
-                    compacted = true;
+                if let Some(ref msg) = message {
+                    // Check for context compaction
+                    if let Some(ref ctx) = msg.context_management
+                        && ctx.truncated_content_length.is_some()
+                    {
+                        warn!("Context compaction detected!");
+                        compacted = true;
+                    }
+                    // Log and check text content
+                    for block in &msg.content {
+                        if let ContentBlock::Text { text } = block {
+                            // Log first 200 chars of assistant text for debugging
+                            let preview: String = text.chars().take(200).collect();
+                            info!("📝 Assistant: {}", preview);
+
+                            if text.contains("Request too large") {
+                                error!("Session context overflow: {}", text);
+                                return Err("REQUEST_TOO_LARGE".to_string());
+                            }
+                        }
+                    }
                 }
             }
             Some(OutputMessage::Result { total_cost_usd, structured_output, session_id }) => {

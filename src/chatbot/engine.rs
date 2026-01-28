@@ -395,6 +395,7 @@ async fn process_messages(
         .unwrap_or((None, None));
 
     // Tool call loop
+    let mut consecutive_empty = 0;
     for iteration in 0..MAX_ITERATIONS {
         info!("🔧 Iteration {}: {} tool call(s)", iteration + 1, response.tool_calls.len());
 
@@ -404,8 +405,13 @@ async fn process_messages(
                 info!("System-only message batch - no response needed");
                 return Ok(());
             }
+            consecutive_empty += 1;
+            if consecutive_empty >= 3 {
+                warn!("3 consecutive empty responses - giving up");
+                break;
+            }
             // No tool calls is an error - Claude must explicitly call done or another tool
-            warn!("No tool calls from Claude - sending error feedback");
+            warn!("No tool calls from Claude - sending error feedback ({}/3)", consecutive_empty);
             response = claude
                 .send_tool_results(vec![ToolResult {
                     tool_use_id: "error".to_string(),
@@ -417,6 +423,8 @@ async fn process_messages(
                 .map_err(|e| format!("Claude error: {e}"))?;
             continue;
         }
+
+        consecutive_empty = 0;
 
         // Check for done
         let has_done = response.tool_calls.iter().any(|tc| matches!(tc.call, ToolCall::Done));
