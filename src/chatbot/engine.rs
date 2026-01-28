@@ -389,11 +389,12 @@ async fn process_messages(
     // Only apply default reply when target chat matches the source chat
     let default_reply_to = messages.last().map(|m| (m.message_id, m.chat_id));
 
-    // Get the requesting user (last non-system message sender) for authorization checks
-    let requesting_user_id = messages.iter()
+    // Get the requesting user and chat (last non-system message) for authorization checks
+    let (requesting_user_id, requesting_chat_id) = messages.iter()
         .rev()
         .find(|m| m.user_id != 0) // Skip system messages (user_id = 0)
-        .map(|m| m.user_id);
+        .map(|m| (Some(m.user_id), Some(m.chat_id)))
+        .unwrap_or((None, None));
 
     // Tool call loop
     for iteration in 0..MAX_ITERATIONS {
@@ -431,7 +432,7 @@ async fn process_messages(
             }
 
             info!("🔧 Executing: {:?}", tc.call);
-            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to, requesting_user_id).await;
+            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to, requesting_user_id, requesting_chat_id).await;
             if let Some(ref content) = result.content {
                 // Safely truncate to ~100 chars without breaking UTF-8
                 let truncated: String = content.chars().take(100).collect();
@@ -518,6 +519,7 @@ async fn execute_tool(
     memory_files_read: &mut HashSet<String>,
     default_reply_to: Option<(i64, i64)>, // (message_id, chat_id)
     requesting_user_id: Option<i64>,       // for authorization checks
+    requesting_chat_id: Option<i64>,       // for DM-only checks
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
@@ -648,11 +650,11 @@ async fn execute_tool(
         ToolCall::CancelReminder { reminder_id } => {
             execute_cancel_reminder(database, *reminder_id).await
         }
-        ToolCall::AddTrustedUser { user_id } => {
-            execute_add_trusted_user(config, telegram, *user_id, requesting_user_id).await
+        ToolCall::AddTrustedUser { user_id, username } => {
+            execute_add_trusted_user(config, database, telegram, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
         }
-        ToolCall::RemoveTrustedUser { user_id } => {
-            execute_remove_trusted_user(config, *user_id, requesting_user_id).await
+        ToolCall::RemoveTrustedUser { user_id, username } => {
+            execute_remove_trusted_user(config, database, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
         }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
@@ -1390,8 +1392,12 @@ async fn save_trusted_users_to_config(
     Ok(())
 }
 
-/// Check if requesting user is the owner.
-fn check_owner_authorization(config: &ChatbotConfig, requesting_user_id: Option<i64>) -> Result<(), String> {
+/// Check if requesting user is the owner AND this is a DM with the owner.
+fn check_owner_dm_authorization(
+    config: &ChatbotConfig,
+    requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
+) -> Result<(), String> {
     let owner_id = config.owner.as_ref()
         .map(|o| o.id)
         .ok_or("No owner configured")?;
@@ -1399,22 +1405,58 @@ fn check_owner_authorization(config: &ChatbotConfig, requesting_user_id: Option<
     let requester = requesting_user_id
         .ok_or("Cannot determine requesting user")?;
 
+    let chat_id = requesting_chat_id
+        .ok_or("Cannot determine chat")?;
+
+    // Must be the owner
     if requester != owner_id {
         return Err("Only the owner can manage trusted users".to_string());
+    }
+
+    // Must be a DM with the owner (in DMs, chat_id == user_id)
+    if chat_id != owner_id {
+        return Err("This command only works in DM with the bot".to_string());
     }
 
     Ok(())
 }
 
-/// Add a user to trusted DM users (owner only).
+/// Resolve username to user_id using database.
+async fn resolve_username_to_id(
+    database: &Mutex<Database>,
+    username: &str,
+) -> Result<i64, String> {
+    // Strip @ if present
+    let username = username.trim_start_matches('@');
+
+    // Look up in database
+    let db = database.lock().await;
+    if let Some(member) = db.find_user_by_username(username) {
+        return Ok(member.user_id);
+    }
+
+    Err(format!("User @{} not found. They need to have sent at least one message in the group.", username))
+}
+
+/// Add a user to trusted DM users (owner only, DM only).
 async fn execute_add_trusted_user(
     config: &ChatbotConfig,
+    database: &Mutex<Database>,
     telegram: &TelegramClient,
-    user_id: i64,
+    user_id: Option<i64>,
+    username: Option<&str>,
     requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
 ) -> Result<Option<String>, String> {
-    // Authorization check
-    check_owner_authorization(config, requesting_user_id)?;
+    // Authorization check - must be owner in DM
+    check_owner_dm_authorization(config, requesting_user_id, requesting_chat_id)?;
+
+    // Resolve user_id from username if needed
+    let resolved_id = match (user_id, username) {
+        (Some(id), _) => id,
+        (None, Some(name)) => resolve_username_to_id(database, name).await?,
+        (None, None) => return Err("Must provide user_id or username".to_string()),
+    };
 
     let shared = config.trusted_dm_users_shared.as_ref()
         .ok_or("Trusted users management not configured")?;
@@ -1424,18 +1466,18 @@ async fn execute_add_trusted_user(
     // Check and add in single lock scope (avoid race condition)
     {
         let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        if users.contains(&UserId(user_id as u64)) {
-            return Err(format!("User {} is already in trusted list", user_id));
+        if users.contains(&UserId(resolved_id as u64)) {
+            return Err(format!("User {} is already in trusted list", resolved_id));
         }
-        users.insert(UserId(user_id as u64));
+        users.insert(UserId(resolved_id as u64));
     }
 
     // Save to config file
     save_trusted_users_to_config(config_path, shared).await?;
 
     // Fetch username for display
-    let username = telegram.get_chat_username(user_id).await.ok().flatten();
-    let trusted_user = TrustedUser::with_username(user_id, username.clone());
+    let fetched_username = telegram.get_chat_username(resolved_id).await.ok().flatten();
+    let trusted_user = TrustedUser::with_username(resolved_id, fetched_username.clone());
 
     // Update display list for system prompt
     {
@@ -1445,18 +1487,47 @@ async fn execute_add_trusted_user(
 
     info!("✅ Added trusted DM user: {}", trusted_user.display());
 
-    let username_str = username.map(|u| format!(" (@{})", u)).unwrap_or_default();
-    Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", user_id, username_str)))
+    let username_str = fetched_username.map(|u| format!(" (@{})", u)).unwrap_or_default();
+    Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", resolved_id, username_str)))
 }
 
-/// Remove a user from trusted DM users (owner only).
+/// Remove a user from trusted DM users (owner only, DM only).
 async fn execute_remove_trusted_user(
     config: &ChatbotConfig,
-    user_id: i64,
+    database: &Mutex<Database>,
+    user_id: Option<i64>,
+    username: Option<&str>,
     requesting_user_id: Option<i64>,
+    requesting_chat_id: Option<i64>,
 ) -> Result<Option<String>, String> {
-    // Authorization check
-    check_owner_authorization(config, requesting_user_id)?;
+    // Authorization check - must be owner in DM
+    check_owner_dm_authorization(config, requesting_user_id, requesting_chat_id)?;
+
+    // Resolve user_id from username if needed
+    let resolved_id = match (user_id, username) {
+        (Some(id), _) => id,
+        (None, Some(name)) => {
+            // For removal, check the display list first (no await needed)
+            let name_clean = name.trim_start_matches('@').to_lowercase();
+            let found_in_display = {
+                let display_users = config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned");
+                display_users.iter().find(|u| {
+                    u.username.as_ref().map(|n| n.to_lowercase()) == Some(name_clean.clone())
+                }).map(|u| u.id)
+            };
+
+            if let Some(id) = found_in_display {
+                id
+            } else {
+                // Fall back to database lookup
+                let db = database.lock().await;
+                db.find_user_by_username(&name_clean)
+                    .map(|m| m.user_id)
+                    .ok_or_else(|| format!("User @{} not found", name))?
+            }
+        }
+        (None, None) => return Err("Must provide user_id or username".to_string()),
+    };
 
     let shared = config.trusted_dm_users_shared.as_ref()
         .ok_or("Trusted users management not configured")?;
@@ -1466,8 +1537,8 @@ async fn execute_remove_trusted_user(
     // Check and remove in single lock scope (avoid race condition)
     {
         let mut users = shared.write().expect("trusted_dm_users lock poisoned");
-        if !users.remove(&UserId(user_id as u64)) {
-            return Err(format!("User {} is not in trusted list", user_id));
+        if !users.remove(&UserId(resolved_id as u64)) {
+            return Err(format!("User {} is not in trusted list", resolved_id));
         }
     }
 
@@ -1477,12 +1548,12 @@ async fn execute_remove_trusted_user(
     // Update display list for system prompt
     {
         let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
-        display_users.retain(|u| u.id != user_id);
+        display_users.retain(|u| u.id != resolved_id);
     }
 
-    info!("✅ Removed trusted DM user: {}", user_id);
+    info!("✅ Removed trusted DM user: {}", resolved_id);
 
-    Ok(Some(format!("Removed user {} from trusted DM users.", user_id)))
+    Ok(Some(format!("Removed user {} from trusted DM users.", resolved_id)))
 }
 
 /// Check and fire due reminders.

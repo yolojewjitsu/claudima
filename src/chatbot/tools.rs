@@ -216,18 +216,26 @@ pub enum ToolCall {
         reminder_id: i64,
     },
 
-    // === Admin Tools (owner only) ===
+    // === Admin Tools (owner only, DM only) ===
 
-    /// Add a user to the trusted DM users list. Owner only.
+    /// Add a user to the trusted DM users list. Owner only, must be used in DM.
     AddTrustedUser {
-        /// User ID to add to trusted list
-        user_id: i64,
+        /// User ID to add (optional if username provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<i64>,
+        /// Username to add (without @, optional if user_id provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
 
-    /// Remove a user from the trusted DM users list. Owner only.
+    /// Remove a user from the trusted DM users list. Owner only, must be used in DM.
     RemoveTrustedUser {
-        /// User ID to remove from trusted list
-        user_id: i64,
+        /// User ID to remove (optional if username provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<i64>,
+        /// Username to remove (without @, optional if user_id provided)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
 
     /// Do nothing - acknowledge a message without taking action.
@@ -571,27 +579,27 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["reminder_id"]
             }),
         },
-        // === Admin Tools (owner only) ===
+        // === Admin Tools (owner only, DM only) ===
         Tool {
             name: "add_trusted_user".to_string(),
-            description: "Add a user to the trusted DM users list. Only the owner can use this. Takes effect immediately (hot-reload).".to_string(),
+            description: "Add a user to the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username (without @).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "user_id": { "type": "integer", "description": "User ID to add to trusted list" }
-                },
-                "required": ["user_id"]
+                    "user_id": { "type": "integer", "description": "User ID to add (optional if username provided)" },
+                    "username": { "type": "string", "description": "Username to add without @ (optional if user_id provided)" }
+                }
             }),
         },
         Tool {
             name: "remove_trusted_user".to_string(),
-            description: "Remove a user from the trusted DM users list. Only the owner can use this. Takes effect immediately (hot-reload).".to_string(),
+            description: "Remove a user from the trusted DM users list. ONLY works in DM with owner. Provide either user_id or username (without @).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "user_id": { "type": "integer", "description": "User ID to remove from trusted list" }
-                },
-                "required": ["user_id"]
+                    "user_id": { "type": "integer", "description": "User ID to remove (optional if username provided)" },
+                    "username": { "type": "string", "description": "Username to remove without @ (optional if user_id provided)" }
+                }
             }),
         },
         Tool {
