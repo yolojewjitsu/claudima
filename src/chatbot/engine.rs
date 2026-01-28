@@ -54,9 +54,9 @@ pub struct ChatbotConfig {
     pub bot_username: Option<String>,
     /// The bot owner
     pub owner: Option<TrustedUser>,
-    /// Users allowed to DM the bot (in addition to owner) - for display in system prompt
-    pub trusted_dm_users: Vec<TrustedUser>,
-    /// Shared set of trusted user IDs for hot-reload (same Arc as Config)
+    /// Users allowed to DM the bot (in addition to owner) - for display in system prompt (shared for hot-reload)
+    pub trusted_dm_users: Arc<RwLock<Vec<TrustedUser>>>,
+    /// Shared set of trusted user IDs for authorization hot-reload (same Arc as Config)
     pub trusted_dm_users_shared: Option<Arc<RwLock<HashSet<UserId>>>>,
     /// Path to config file for saving changes
     pub config_path: Option<PathBuf>,
@@ -73,7 +73,7 @@ impl Default for ChatbotConfig {
             bot_user_id: 0,
             bot_username: None,
             owner: None,
-            trusted_dm_users: vec![],
+            trusted_dm_users: Arc::new(RwLock::new(vec![])),
             trusted_dm_users_shared: None,
             config_path: None,
             debounce_ms: 1000,
@@ -504,6 +504,11 @@ fn format_messages(messages: &[ChatMessage]) -> String {
 }
 
 /// Execute a tool call.
+///
+/// Note: This function has many parameters because it's the central dispatch
+/// for all tool types, each needing different subsets of context. A struct
+/// would complicate the mutable borrow of memory_files_read.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     config: &ChatbotConfig,
     context: &Mutex<ContextBuffer>,
@@ -1428,15 +1433,20 @@ async fn execute_add_trusted_user(
     // Save to config file
     save_trusted_users_to_config(config_path, shared).await?;
 
-    info!("✅ Added trusted DM user: {}", user_id);
+    // Fetch username for display
+    let username = telegram.get_chat_username(user_id).await.ok().flatten();
+    let trusted_user = TrustedUser::with_username(user_id, username.clone());
 
-    // Try to get username for nice response
-    let username = match telegram.get_chat_username(user_id).await {
-        Ok(Some(u)) => format!(" (@{})", u),
-        _ => String::new(),
-    };
+    // Update display list for system prompt
+    {
+        let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
+        display_users.push(trusted_user.clone());
+    }
 
-    Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", user_id, username)))
+    info!("✅ Added trusted DM user: {}", trusted_user.display());
+
+    let username_str = username.map(|u| format!(" (@{})", u)).unwrap_or_default();
+    Ok(Some(format!("Added user {}{} to trusted DM users. They can now DM the bot.", user_id, username_str)))
 }
 
 /// Remove a user from trusted DM users (owner only).
@@ -1463,6 +1473,12 @@ async fn execute_remove_trusted_user(
 
     // Save to config file
     save_trusted_users_to_config(config_path, shared).await?;
+
+    // Update display list for system prompt
+    {
+        let mut display_users = config.trusted_dm_users.write().expect("trusted_dm_users display lock poisoned");
+        display_users.retain(|u| u.id != user_id);
+    }
 
     info!("✅ Removed trusted DM user: {}", user_id);
 
@@ -1590,7 +1606,7 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
         if let Some(owner) = &config.owner {
             allowed.push(format!("{} (owner)", owner.display()));
         }
-        for user in &config.trusted_dm_users {
+        for user in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
             allowed.push(user.display());
         }
         if allowed.is_empty() {

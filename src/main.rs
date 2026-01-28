@@ -62,10 +62,18 @@ impl BotState {
             };
 
             // Fetch trusted DM users info from Telegram
+            // Collect IDs first to avoid holding lock across await
+            let trusted_ids: Vec<i64> = config.trusted_dm_users
+                .read()
+                .expect("trusted_dm_users lock poisoned")
+                .iter()
+                .map(|u| u.0 as i64)
+                .collect();
+
             let mut trusted_dm_users_display = Vec::new();
-            for user_id in config.trusted_dm_users.read().expect("trusted_dm_users lock poisoned").iter() {
-                let username = telegram.get_chat_username(user_id.0 as i64).await.ok().flatten();
-                let user = TrustedUser::with_username(user_id.0 as i64, username);
+            for user_id in trusted_ids {
+                let username = telegram.get_chat_username(user_id).await.ok().flatten();
+                let user = TrustedUser::with_username(user_id, username);
                 info!("Trusted DM user: {}", user.display());
                 trusted_dm_users_display.push(user);
             }
@@ -75,7 +83,7 @@ impl BotState {
                 bot_user_id,
                 bot_username: bot_username.clone(),
                 owner,
-                trusted_dm_users: trusted_dm_users_display,
+                trusted_dm_users: Arc::new(std::sync::RwLock::new(trusted_dm_users_display)),
                 trusted_dm_users_shared: Some(config.trusted_dm_users.clone()),
                 config_path: Some(config.config_path.clone()),
                 debounce_ms: 1000,
