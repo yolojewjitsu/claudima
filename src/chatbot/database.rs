@@ -833,4 +833,150 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].message, "Past");
     }
+
+    #[test]
+    fn test_get_recent_by_tokens() {
+        let mut db = Database::new();
+        // Add messages with increasing timestamps
+        for i in 0..10 {
+            db.add_message(make_msg(i, 100, "alice", &format!("2024-01-15 10:{:02}", i), &format!("Message {i}")));
+        }
+
+        // Request with small token budget - should get fewer messages
+        let recent = db.get_recent_by_tokens(50); // ~200 chars
+        assert!(!recent.is_empty());
+        assert!(recent.len() < 10);
+        // Should be in chronological order (oldest first)
+        assert!(recent[0].text.contains("Message"));
+    }
+
+    #[test]
+    fn test_import_members() {
+        let mut db = Database::new();
+        let json = r#"[
+            {"user_id": 100, "username": "alice", "first_name": "Alice"},
+            {"user_id": 101, "username": "bob", "name": "Bob"},
+            {"id": 102, "username": "charlie"}
+        ]"#;
+
+        let count = db.import_members(json).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(db.member_count(), 3);
+
+        // Verify imported data
+        let alice = db.find_user_by_username("alice").unwrap();
+        assert_eq!(alice.user_id, 100);
+    }
+
+    #[test]
+    fn test_import_members_ignores_duplicates() {
+        let mut db = Database::new();
+        db.member_joined(100, Some("existing".to_string()), "Existing".to_string(), "2024-01-01".to_string());
+
+        let json = r#"[{"user_id": 100, "username": "alice"}]"#;
+        let count = db.import_members(json).unwrap();
+        assert_eq!(count, 0); // Should not import duplicate
+
+        // Original data should be preserved
+        let member = db.find_user_by_username("existing").unwrap();
+        assert_eq!(member.first_name, "Existing");
+    }
+
+    #[test]
+    fn test_query_sql_injection_blocked() {
+        let db = Database::new();
+        // Various SQL injection attempts
+        assert!(db.query("SELECT * FROM messages WHERE id = 1; DELETE FROM messages").is_err());
+        assert!(db.query("SELECT * FROM messages; UPDATE users SET status='banned'").is_err());
+        assert!(db.query("SELECT * FROM messages; CREATE TABLE evil(x)").is_err());
+    }
+
+    #[test]
+    fn test_migrate_from_json() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a JSON file with test data
+        let json_content = r#"{
+            "messages": [
+                {"message_id": 1, "chat_id": -100, "user_id": 42, "username": "testuser", "timestamp": "2024-01-15 10:00", "text": "Hello", "reply_to": null}
+            ],
+            "members": [
+                {"user_id": 42, "username": "testuser", "first_name": "Test", "join_date": "2024-01-01", "last_message_date": "2024-01-15", "message_count": 5, "status": "member"}
+            ]
+        }"#;
+
+        // Write JSON file
+        let mut json_file = NamedTempFile::with_suffix(".json").unwrap();
+        json_file.write_all(json_content.as_bytes()).unwrap();
+
+        // Create DB file path (same name but .db extension)
+        let db_path = json_file.path().with_extension("db");
+
+        // Load database - should migrate from JSON
+        let db = Database::load_or_new(&db_path);
+
+        // Verify migration
+        assert_eq!(db.member_count(), 1);
+        let member = db.find_user_by_username("testuser").unwrap();
+        assert_eq!(member.user_id, 42);
+        assert_eq!(member.first_name, "Test");
+
+        // Cleanup
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn test_reschedule_reminder() {
+        let mut db = Database::new();
+        let initial = Utc::now() + chrono::Duration::hours(1);
+        let next = Utc::now() + chrono::Duration::hours(2);
+
+        let id = db.create_reminder(-12345, 100, "Recurring", initial, Some("0 * * * *")).unwrap();
+
+        db.reschedule_reminder(id, next).unwrap();
+
+        let reminders = db.list_reminders(None);
+        assert_eq!(reminders.len(), 1);
+        // The trigger time should be updated
+        assert!(reminders[0].trigger_at > initial);
+    }
+
+    #[test]
+    fn test_mark_reminder_completed() {
+        let mut db = Database::new();
+        let trigger = Utc::now() - chrono::Duration::hours(1);
+
+        let id = db.create_reminder(-12345, 100, "One-time", trigger, None).unwrap();
+        assert_eq!(db.get_due_reminders().len(), 1);
+
+        db.mark_reminder_completed(id).unwrap();
+        assert_eq!(db.get_due_reminders().len(), 0);
+        assert_eq!(db.list_reminders(None).len(), 0); // Completed = not active
+    }
+
+    #[test]
+    fn test_get_members_filters() {
+        let mut db = Database::new();
+
+        // Add members with different statuses
+        db.member_joined(1, Some("active".to_string()), "Active".to_string(), "2024-01-01".to_string());
+        db.add_message(make_msg(1, 1, "active", "2024-01-15 10:00", "hello")); // Has messages
+
+        db.member_joined(2, Some("lurker".to_string()), "Lurker".to_string(), "2024-01-01".to_string());
+        // No messages for lurker
+
+        db.member_joined(3, Some("leaver".to_string()), "Leaver".to_string(), "2024-01-01".to_string());
+        db.member_left(3);
+
+        // Test filters
+        let active = db.get_members(Some("active"), None, 100);
+        assert!(active.iter().any(|m| m.username.as_deref() == Some("active")));
+
+        let never_posted = db.get_members(Some("never_posted"), None, 100);
+        assert!(never_posted.iter().any(|m| m.username.as_deref() == Some("lurker")));
+
+        let left = db.get_members(Some("left"), None, 100);
+        assert!(left.iter().any(|m| m.username.as_deref() == Some("leaver")));
+    }
 }
