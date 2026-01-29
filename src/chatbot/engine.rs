@@ -24,6 +24,20 @@ const MAX_ITERATIONS: usize = 10;
 /// Token budget for context restoration after compaction.
 const COMPACTION_RESTORE_TOKENS: usize = 10000;
 
+/// Context for tool execution, bundling shared state to reduce parameter count.
+struct ToolContext<'a> {
+    config: &'a ChatbotConfig,
+    context: &'a Mutex<ContextBuffer>,
+    database: &'a Mutex<Database>,
+    telegram: &'a TelegramClient,
+    /// Default reply target for maintaining conversation threads: (message_id, chat_id)
+    default_reply_to: Option<(i64, i64)>,
+    /// User ID of the requester (for authorization checks)
+    requesting_user_id: Option<i64>,
+    /// Chat ID where the request originated (for DM-only checks)
+    requesting_chat_id: Option<i64>,
+}
+
 /// A trusted user with ID and optional username.
 #[derive(Debug, Clone)]
 pub struct TrustedUser {
@@ -394,6 +408,17 @@ async fn process_messages(
         .map(|m| (Some(m.user_id), Some(m.chat_id)))
         .unwrap_or((None, None));
 
+    // Bundle shared context for tool execution
+    let tool_ctx = ToolContext {
+        config,
+        context,
+        database,
+        telegram,
+        default_reply_to,
+        requesting_user_id,
+        requesting_chat_id,
+    };
+
     // Tool call loop
     let mut consecutive_empty = 0;
     for iteration in 0..MAX_ITERATIONS {
@@ -443,7 +468,7 @@ async fn process_messages(
             }
 
             info!("🔧 Executing: {:?}", tc.call);
-            let result = execute_tool(config, context, database, telegram, tc, &mut memory_files_read, default_reply_to, requesting_user_id, requesting_chat_id).await;
+            let result = execute_tool(&tool_ctx, tc, &mut memory_files_read).await;
             if let Some(ref content) = result.content {
                 // Safely truncate to ~100 chars without breaking UTF-8
                 let truncated: String = content.chars().take(100).collect();
@@ -516,35 +541,24 @@ fn format_messages(messages: &[ChatMessage]) -> String {
 }
 
 /// Execute a tool call.
-///
-/// Note: This function has many parameters because it's the central dispatch
-/// for all tool types, each needing different subsets of context. A struct
-/// would complicate the mutable borrow of memory_files_read.
-#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
-    config: &ChatbotConfig,
-    context: &Mutex<ContextBuffer>,
-    database: &Mutex<Database>,
-    telegram: &TelegramClient,
+    ctx: &ToolContext<'_>,
     tc: &ToolCallWithId,
     memory_files_read: &mut HashSet<String>,
-    default_reply_to: Option<(i64, i64)>, // (message_id, chat_id)
-    requesting_user_id: Option<i64>,       // for authorization checks
-    requesting_chat_id: Option<i64>,       // for DM-only checks
 ) -> ToolResult {
     let result = match &tc.call {
         ToolCall::SendMessage { chat_id, text, reply_to_message_id } => {
             // Use default_reply_to if none specified and chat matches (maintains conversation threads)
             let reply_to = reply_to_message_id.or_else(|| {
-                default_reply_to.and_then(|(msg_id, from_chat)| {
+                ctx.default_reply_to.and_then(|(msg_id, from_chat)| {
                     if from_chat == *chat_id { Some(msg_id) } else { None }
                 })
             });
-            execute_send_message(config, context, database, telegram, *chat_id, text, reply_to).await
+            execute_send_message(ctx.config, ctx.context, ctx.database, ctx.telegram, *chat_id, text, reply_to).await
         }
         ToolCall::GetUserInfo { user_id, username } => {
             // Handle specially to include profile photo for Claude to see
-            match execute_get_user_info(config, database, telegram, *user_id, username.as_deref()).await {
+            match execute_get_user_info(ctx.config, ctx.database, ctx.telegram, *user_id, username.as_deref()).await {
                 Ok((content, profile_photo)) => {
                     return ToolResult {
                         tool_use_id: tc.id.clone(),
@@ -564,41 +578,41 @@ async fn execute_tool(
             }
         }
         ToolCall::Query { sql } => {
-            execute_query(database, sql).await
+            execute_query(ctx.database, sql).await
         }
         ToolCall::AddReaction { chat_id, message_id, emoji } => {
-            execute_add_reaction(telegram, *chat_id, *message_id, emoji).await
+            execute_add_reaction(ctx.telegram, *chat_id, *message_id, emoji).await
         }
         ToolCall::DeleteMessage { chat_id, message_id } => {
-            execute_delete_message(config, telegram, *chat_id, *message_id).await
+            execute_delete_message(ctx.config, ctx.telegram, *chat_id, *message_id).await
         }
         ToolCall::MuteUser { chat_id, user_id, duration_minutes } => {
-            execute_mute_user(config, telegram, *chat_id, *user_id, *duration_minutes).await
+            execute_mute_user(ctx.config, ctx.telegram, *chat_id, *user_id, *duration_minutes).await
         }
         ToolCall::BanUser { chat_id, user_id } => {
-            execute_ban_user(config, telegram, *chat_id, *user_id).await
+            execute_ban_user(ctx.config, ctx.telegram, *chat_id, *user_id).await
         }
         ToolCall::KickUser { chat_id, user_id } => {
-            execute_kick_user(config, telegram, *chat_id, *user_id).await
+            execute_kick_user(ctx.config, ctx.telegram, *chat_id, *user_id).await
         }
         ToolCall::GetChatAdmins { chat_id } => {
-            execute_get_chat_admins(telegram, *chat_id).await
+            execute_get_chat_admins(ctx.telegram, *chat_id).await
         }
         ToolCall::GetMembers { filter, days_inactive, limit } => {
-            execute_get_members(database, filter.as_deref(), *days_inactive, *limit).await
+            execute_get_members(ctx.database, filter.as_deref(), *days_inactive, *limit).await
         }
         ToolCall::ImportMembers { file_path } => {
-            execute_import_members(database, config.data_dir.as_ref(), file_path).await
+            execute_import_members(ctx.database, ctx.config.data_dir.as_ref(), file_path).await
         }
         ToolCall::SendPhoto { chat_id, prompt, caption, reply_to_message_id } => {
             // Handle specially to include image data for Claude to see
             // Use default_reply_to if none specified and chat matches (maintains conversation threads)
             let reply_to = reply_to_message_id.or_else(|| {
-                default_reply_to.and_then(|(msg_id, from_chat)| {
+                ctx.default_reply_to.and_then(|(msg_id, from_chat)| {
                     if from_chat == *chat_id { Some(msg_id) } else { None }
                 })
             });
-            match execute_send_image(config, telegram, *chat_id, prompt, caption.as_deref(), reply_to).await {
+            match execute_send_image(ctx.config, ctx.telegram, *chat_id, prompt, caption.as_deref(), reply_to).await {
                 Ok(image_data) => {
                     return ToolResult {
                         tool_use_id: tc.id.clone(),
@@ -620,52 +634,52 @@ async fn execute_tool(
         ToolCall::SendVoice { chat_id, text, voice, reply_to_message_id } => {
             // Use default_reply_to if none specified and chat matches (maintains conversation threads)
             let reply_to = reply_to_message_id.or_else(|| {
-                default_reply_to.and_then(|(msg_id, from_chat)| {
+                ctx.default_reply_to.and_then(|(msg_id, from_chat)| {
                     if from_chat == *chat_id { Some(msg_id) } else { None }
                 })
             });
-            execute_send_voice(config, telegram, *chat_id, text, voice.as_deref(), reply_to).await
+            execute_send_voice(ctx.config, ctx.telegram, *chat_id, text, voice.as_deref(), reply_to).await
         }
         // Memory tools
         ToolCall::CreateMemory { path, content } => {
-            execute_create_memory(config.data_dir.as_ref(), path, content).await
+            execute_create_memory(ctx.config.data_dir.as_ref(), path, content).await
         }
         ToolCall::ReadMemory { path } => {
-            execute_read_memory(config.data_dir.as_ref(), path, memory_files_read).await
+            execute_read_memory(ctx.config.data_dir.as_ref(), path, memory_files_read).await
         }
         ToolCall::EditMemory { path, old_string, new_string } => {
-            execute_edit_memory(config.data_dir.as_ref(), path, old_string, new_string, memory_files_read).await
+            execute_edit_memory(ctx.config.data_dir.as_ref(), path, old_string, new_string, memory_files_read).await
         }
         ToolCall::ListMemories { path } => {
-            execute_list_memories(config.data_dir.as_ref(), path.as_deref()).await
+            execute_list_memories(ctx.config.data_dir.as_ref(), path.as_deref()).await
         }
         ToolCall::SearchMemories { pattern, path } => {
-            execute_search_memories(config.data_dir.as_ref(), pattern, path.as_deref()).await
+            execute_search_memories(ctx.config.data_dir.as_ref(), pattern, path.as_deref()).await
         }
         ToolCall::DeleteMemory { path } => {
-            execute_delete_memory(config.data_dir.as_ref(), path).await
+            execute_delete_memory(ctx.config.data_dir.as_ref(), path).await
         }
         ToolCall::ReportBug { description, severity } => {
-            execute_report_bug(config.data_dir.as_ref(), description, severity.as_deref()).await
+            execute_report_bug(ctx.config.data_dir.as_ref(), description, severity.as_deref()).await
         }
         ToolCall::YoutubeInfo { url } => {
             execute_youtube_info(url).await
         }
         // Reminder tools
         ToolCall::SetReminder { chat_id, message, trigger_at, repeat_cron } => {
-            execute_set_reminder(database, *chat_id, message, trigger_at, repeat_cron.as_deref()).await
+            execute_set_reminder(ctx.database, *chat_id, message, trigger_at, repeat_cron.as_deref()).await
         }
         ToolCall::ListReminders { chat_id } => {
-            execute_list_reminders(database, *chat_id).await
+            execute_list_reminders(ctx.database, *chat_id).await
         }
         ToolCall::CancelReminder { reminder_id } => {
-            execute_cancel_reminder(database, *reminder_id).await
+            execute_cancel_reminder(ctx.database, *reminder_id).await
         }
         ToolCall::AddTrustedUser { user_id, username } => {
-            execute_add_trusted_user(config, database, telegram, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
+            execute_add_trusted_user(ctx.config, ctx.database, ctx.telegram, *user_id, username.as_deref(), ctx.requesting_user_id, ctx.requesting_chat_id).await
         }
         ToolCall::RemoveTrustedUser { user_id, username } => {
-            execute_remove_trusted_user(config, database, *user_id, username.as_deref(), requesting_user_id, requesting_chat_id).await
+            execute_remove_trusted_user(ctx.config, ctx.database, *user_id, username.as_deref(), ctx.requesting_user_id, ctx.requesting_chat_id).await
         }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),

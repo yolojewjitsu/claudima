@@ -73,8 +73,21 @@ pub struct Config {
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Self {
         let config_path = path.as_ref().to_path_buf();
-        let content = std::fs::read_to_string(&config_path).expect("Failed to read config file");
-        let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
+        let content = std::fs::read_to_string(&config_path)
+            .unwrap_or_else(|e| panic!("Failed to read config file '{}': {}", config_path.display(), e));
+        let file: ConfigFile = serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse config file '{}': {}", config_path.display(), e));
+
+        // Validate required fields
+        if file.owner_ids.is_empty() {
+            panic!("Config error: owner_ids must contain at least one owner ID");
+        }
+        if file.telegram_bot_token.is_empty() {
+            panic!("Config error: telegram_bot_token is required");
+        }
+        if !file.telegram_bot_token.contains(':') {
+            panic!("Config error: telegram_bot_token appears invalid (expected format: 123456:ABC-DEF...)");
+        }
 
         let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
         // Initialize with None usernames - main.rs will fetch from Telegram
