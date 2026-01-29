@@ -52,7 +52,7 @@ impl BotState {
             let telegram = Arc::new(TelegramClient::new(bot.clone()));
 
             // Fetch owner info from Telegram
-            let owner = if let Some(owner_id) = config.owner_ids.iter().next() {
+            let owner = if let Some(owner_id) = config.owner_ids.first() {
                 let username = telegram.get_chat_username(owner_id.0 as i64).await.ok().flatten();
                 let owner = TrustedUser::with_username(owner_id.0 as i64, username);
                 info!("Owner: {}", owner.display());

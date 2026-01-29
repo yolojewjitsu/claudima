@@ -610,10 +610,10 @@ fn worker_loop(
             let _ = session.process.wait();
 
             // Delete session file to prevent resuming the broken session
-            if let Some(ref path) = session_file {
-                if let Err(e) = std::fs::remove_file(path) {
-                    warn!("Failed to delete session file: {}", e);
-                }
+            if let Some(ref path) = session_file
+                && let Err(e) = std::fs::remove_file(path)
+            {
+                warn!("Failed to delete session file: {}", e);
             }
 
             // Start fresh session (no resume)

@@ -42,7 +42,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
-            owner_ids: std::collections::HashSet::from([teloxide::types::UserId(1)]),
+            owner_ids: vec![teloxide::types::UserId(1)],
             trusted_dm_users: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             config_path: std::path::PathBuf::from("test.json"),
             telegram_bot_token: String::new(),
