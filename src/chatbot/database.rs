@@ -1,11 +1,14 @@
 //! Persistent SQLite database for messages, members, and reminders.
+//!
+//! Note: This Database struct is NOT thread-safe on its own. It must be wrapped
+//! in a `tokio::sync::Mutex` (as done in `ChatbotEngine`) for safe concurrent access.
+//! The mutex is intentionally kept external to allow async-aware locking.
 
 use crate::chatbot::message::{ChatMessage, ReplyTo};
 use crate::chatbot::reminders::Reminder;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use std::sync::Mutex;
 use tracing::{info, warn, debug};
 
 /// Member status in the group.
@@ -39,15 +42,17 @@ pub struct Member {
 }
 
 /// Persistent SQLite database for the chatbot.
+///
+/// Must be wrapped in a `tokio::sync::Mutex` for concurrent access.
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Connection,
 }
 
 impl Database {
     /// Create a new in-memory database.
     pub fn new() -> Self {
         let conn = Connection::open_in_memory().expect("Failed to create in-memory database");
-        let db = Self { conn: Mutex::new(conn) };
+        let mut db = Self { conn };
         db.init_schema();
         db
     }
@@ -59,7 +64,7 @@ impl Database {
         let db_exists = path.exists();
 
         let conn = Connection::open(path).expect("Failed to open database");
-        let db = Self { conn: Mutex::new(conn) };
+        let mut db = Self { conn };
         db.init_schema();
 
         // Migrate from JSON if database is new and JSON exists
@@ -76,10 +81,8 @@ impl Database {
         db
     }
 
-    fn init_schema(&self) {
-        let conn = self.conn.lock().unwrap();
-
-        conn.execute_batch(r"
+    fn init_schema(&mut self) {
+        self.conn.execute_batch(r"
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -124,7 +127,7 @@ impl Database {
     }
 
     fn get_counts(&self) -> (usize, usize) {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let msg_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages", [], |row| row.get(0)
         ).unwrap_or(0);
@@ -183,7 +186,7 @@ impl Database {
         let data: JsonDatabase = serde_json::from_str(&json)
             .map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
 
         // Import members
         for m in &data.members {
@@ -219,7 +222,7 @@ impl Database {
 
     /// Add a message to the database.
     pub fn add_message(&mut self, msg: ChatMessage) {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
 
         // Insert or update user
         conn.execute(
@@ -254,7 +257,7 @@ impl Database {
     /// Total message count.
     #[cfg(test)]
     pub fn message_count(&self) -> usize {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) as usize
     }
@@ -262,7 +265,7 @@ impl Database {
     /// Get recent messages up to a token budget.
     pub fn get_recent_by_tokens(&self, max_tokens: usize) -> Vec<ChatMessage> {
         let chars_budget = max_tokens * 4;
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
 
         // Get recent messages in reverse order
         let mut stmt = conn.prepare(
@@ -325,7 +328,7 @@ impl Database {
             }
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let mut stmt = conn.prepare(sql_trimmed)
             .map_err(|e| format!("Query error: {e}"))?;
 
@@ -393,7 +396,7 @@ impl Database {
         let imported: Vec<ImportMember> = serde_json::from_str(members_json)
             .map_err(|e| format!("Failed to parse members JSON: {e}"))?;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let timestamp = "imported";
         let mut count = 0;
 
@@ -421,7 +424,7 @@ impl Database {
 
     /// Record a member joining.
     pub fn member_joined(&mut self, user_id: i64, username: Option<String>, first_name: String, timestamp: String) {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
 
         conn.execute(
             "INSERT INTO users (user_id, username, first_name, join_date, status)
@@ -441,7 +444,7 @@ impl Database {
 
     /// Record a member leaving.
     pub fn member_left(&mut self, user_id: i64) {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         conn.execute(
             "UPDATE users SET status = 'left' WHERE user_id = ?1",
             params![user_id]
@@ -454,7 +457,7 @@ impl Database {
 
     /// Record a member being banned.
     pub fn member_banned(&mut self, user_id: i64) {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         conn.execute(
             "UPDATE users SET status = 'banned' WHERE user_id = ?1",
             params![user_id]
@@ -467,7 +470,7 @@ impl Database {
 
     /// Find a user by username (case-insensitive partial match).
     pub fn find_user_by_username(&self, username: &str) -> Option<Member> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let pattern = format!("%{}%", username.to_lowercase());
 
         conn.query_row(
@@ -488,7 +491,7 @@ impl Database {
 
     /// Get members with optional filter.
     pub fn get_members(&self, filter: Option<&str>, days_inactive: Option<i64>, limit: usize) -> Vec<Member> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let days = days_inactive.unwrap_or(30);
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
         let cutoff_str = cutoff.format("%Y-%m-%d %H:%M").to_string();
@@ -534,7 +537,7 @@ impl Database {
 
     /// Get member count (active members only).
     pub fn member_count(&self) -> usize {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         conn.query_row(
             "SELECT COUNT(*) FROM users WHERE status = 'member'",
             [],
@@ -544,7 +547,7 @@ impl Database {
 
     /// Get total members ever seen.
     pub fn total_members_seen(&self) -> usize {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) as usize
     }
@@ -560,7 +563,7 @@ impl Database {
         trigger_at: DateTime<Utc>,
         repeat_cron: Option<&str>,
     ) -> Result<i64, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let now = Utc::now().to_rfc3339();
         let trigger_str = trigger_at.to_rfc3339();
 
@@ -577,7 +580,7 @@ impl Database {
 
     /// List active reminders, optionally filtered by chat_id.
     pub fn list_reminders(&self, chat_id: Option<i64>) -> Vec<Reminder> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
 
         let sql = match chat_id {
             Some(_) => "SELECT id, chat_id, user_id, message, trigger_at, repeat_cron, created_at, last_triggered_at, active
@@ -613,7 +616,7 @@ impl Database {
 
     /// Cancel a reminder by ID. Returns true if found and cancelled.
     pub fn cancel_reminder(&mut self, reminder_id: i64) -> Result<bool, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let rows = conn.execute(
             "UPDATE reminders SET active = 0 WHERE id = ?1 AND active = 1",
             params![reminder_id]
@@ -629,7 +632,7 @@ impl Database {
 
     /// Get all due reminders (trigger_at <= now AND active = 1).
     pub fn get_due_reminders(&self) -> Vec<Reminder> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = match conn.prepare(
@@ -656,7 +659,7 @@ impl Database {
 
     /// Mark a one-time reminder as completed (active = 0).
     pub fn mark_reminder_completed(&mut self, reminder_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE reminders SET active = 0, last_triggered_at = ?1 WHERE id = ?2",
@@ -668,7 +671,7 @@ impl Database {
 
     /// Reschedule a recurring reminder to its next trigger time.
     pub fn reschedule_reminder(&mut self, reminder_id: i64, next_trigger: DateTime<Utc>) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = &self.conn;
         let now = Utc::now().to_rfc3339();
         let trigger_str = next_trigger.to_rfc3339();
         conn.execute(
