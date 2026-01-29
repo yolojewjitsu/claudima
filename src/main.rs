@@ -202,7 +202,10 @@ fn parse_args() -> (String, Option<String>) {
 #[tokio::main]
 async fn main() {
     let (config_path, system_message) = parse_args();
-    let config = Config::load(&config_path);
+    let config = Config::load(&config_path).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
 
     let bot = Bot::new(&config.telegram_bot_token);
 

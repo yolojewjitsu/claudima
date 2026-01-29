@@ -1,9 +1,51 @@
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use teloxide::types::{ChatId, UserId};
+
+/// Errors that can occur when loading configuration.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// Failed to read the config file.
+    ReadFile { path: PathBuf, source: std::io::Error },
+    /// Failed to parse JSON.
+    ParseJson { path: PathBuf, source: serde_json::Error },
+    /// Invalid regex pattern.
+    InvalidRegex { pattern: String, source: regex::Error },
+    /// Validation error.
+    Validation(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadFile { path, source } => {
+                write!(f, "failed to read config file '{}': {}", path.display(), source)
+            }
+            Self::ParseJson { path, source } => {
+                write!(f, "failed to parse config file '{}': {}", path.display(), source)
+            }
+            Self::InvalidRegex { pattern, source } => {
+                write!(f, "invalid regex pattern '{}': {}", pattern, source)
+            }
+            Self::Validation(msg) => write!(f, "config validation error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ReadFile { source, .. } => Some(source),
+            Self::ParseJson { source, .. } => Some(source),
+            Self::InvalidRegex { source, .. } => Some(source),
+            Self::Validation(_) => None,
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct ConfigFile {
@@ -71,22 +113,26 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load<P: AsRef<Path>>(path: P) -> Self {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let config_path = path.as_ref().to_path_buf();
         let content = std::fs::read_to_string(&config_path)
-            .unwrap_or_else(|e| panic!("Failed to read config file '{}': {}", config_path.display(), e));
+            .map_err(|e| ConfigError::ReadFile { path: config_path.clone(), source: e })?;
         let file: ConfigFile = serde_json::from_str(&content)
-            .unwrap_or_else(|e| panic!("Failed to parse config file '{}': {}", config_path.display(), e));
+            .map_err(|e| ConfigError::ParseJson { path: config_path.clone(), source: e })?;
 
         // Validate required fields
         if file.owner_ids.is_empty() {
-            panic!("Config error: owner_ids must contain at least one owner ID");
+            return Err(ConfigError::Validation("owner_ids must contain at least one owner ID".into()));
         }
         if file.telegram_bot_token.is_empty() {
-            panic!("Config error: telegram_bot_token is required");
+            return Err(ConfigError::Validation("telegram_bot_token is required".into()));
         }
-        if !file.telegram_bot_token.contains(':') {
-            panic!("Config error: telegram_bot_token appears invalid (expected format: 123456:ABC-DEF...)");
+        // Telegram tokens are formatted as {bot_id}:{secret} where bot_id is numeric
+        let token_parts: Vec<&str> = file.telegram_bot_token.split(':').collect();
+        if token_parts.len() != 2 || token_parts[0].parse::<u64>().is_err() || token_parts[1].is_empty() {
+            return Err(ConfigError::Validation(
+                "telegram_bot_token appears invalid (expected format: 123456789:ABCdefGHI...)".into()
+            ));
         }
 
         let owner_ids = file.owner_ids.into_iter().map(UserId).collect();
@@ -104,8 +150,8 @@ impl Config {
         } else {
             file.spam_patterns
                 .into_iter()
-                .map(|p| Regex::new(&p).expect("Invalid spam pattern regex"))
-                .collect()
+                .map(|p| Regex::new(&p).map_err(|e| ConfigError::InvalidRegex { pattern: p, source: e }))
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let safe_patterns = if file.safe_patterns.is_empty() {
@@ -113,8 +159,8 @@ impl Config {
         } else {
             file.safe_patterns
                 .into_iter()
-                .map(|p| Regex::new(&p).expect("Invalid safe pattern regex"))
-                .collect()
+                .map(|p| Regex::new(&p).map_err(|e| ConfigError::InvalidRegex { pattern: p, source: e }))
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let data_dir = file
@@ -122,7 +168,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
 
-        Self {
+        Ok(Self {
             owner_ids,
             trusted_dm_users,
             config_path,
@@ -139,7 +185,7 @@ impl Config {
             data_dir,
             whisper_model_path: file.whisper_model_path.map(PathBuf::from),
             tts_endpoint: file.tts_endpoint,
-        }
+        })
     }
 
     pub fn is_owner(&self, user_id: UserId) -> bool {
@@ -180,4 +226,112 @@ fn default_safe_patterns() -> Vec<Regex> {
         .into_iter()
         .map(|p| Regex::new(p).unwrap())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn write_config(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file
+    }
+
+    fn assert_err<T>(result: Result<T, ConfigError>) -> ConfigError {
+        match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn test_valid_config() {
+        let file = write_config(r#"{
+            "owner_ids": [123456],
+            "telegram_bot_token": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+        }"#);
+        let config = Config::load(file.path()).expect("should load valid config");
+        assert_eq!(config.owner_ids.len(), 1);
+        assert_eq!(config.owner_ids[0], UserId(123456));
+    }
+
+    #[test]
+    fn test_empty_owner_ids() {
+        let file = write_config(r#"{
+            "owner_ids": [],
+            "telegram_bot_token": "123456789:ABCdef"
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("owner_ids"));
+    }
+
+    #[test]
+    fn test_empty_token() {
+        let file = write_config(r#"{
+            "owner_ids": [123],
+            "telegram_bot_token": ""
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("telegram_bot_token"));
+    }
+
+    #[test]
+    fn test_invalid_token_format_no_colon() {
+        let file = write_config(r#"{
+            "owner_ids": [123],
+            "telegram_bot_token": "invalid_token_no_colon"
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn test_invalid_token_format_non_numeric_id() {
+        let file = write_config(r#"{
+            "owner_ids": [123],
+            "telegram_bot_token": "notanumber:ABCdef"
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    #[test]
+    fn test_invalid_token_format_empty_secret() {
+        let file = write_config(r#"{
+            "owner_ids": [123],
+            "telegram_bot_token": "123456789:"
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    #[test]
+    fn test_invalid_regex_pattern() {
+        let file = write_config(r#"{
+            "owner_ids": [123],
+            "telegram_bot_token": "123456789:ABCdef",
+            "spam_patterns": ["[invalid(regex"]
+        }"#);
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::InvalidRegex { .. }));
+    }
+
+    #[test]
+    fn test_file_not_found() {
+        let err = assert_err(Config::load("/nonexistent/path/config.json"));
+        assert!(matches!(err, ConfigError::ReadFile { .. }));
+    }
+
+    #[test]
+    fn test_invalid_json() {
+        let file = write_config("{ invalid json }");
+        let err = assert_err(Config::load(file.path()));
+        assert!(matches!(err, ConfigError::ParseJson { .. }));
+    }
 }
