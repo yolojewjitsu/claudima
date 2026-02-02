@@ -10,6 +10,9 @@ use tracing::warn;
 ///
 /// Each call to `trigger()` resets the timer. When the timer expires
 /// (no triggers for the specified duration), the callback is executed.
+///
+/// This struct is `Clone` - all clones share the same underlying timer.
+#[derive(Clone)]
 pub struct Debouncer {
     /// Channel to signal reset
     reset_tx: mpsc::Sender<()>,

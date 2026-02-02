@@ -48,7 +48,7 @@ impl BotState {
 
         // Create chatbot if enabled
         let chatbot = if !config.allowed_groups.is_empty() {
-            let primary_chat_id = config.allowed_groups.iter().next().map(|id| id.0).unwrap_or(0);
+            let primary_chat_id = config.primary_chat_id;
             let telegram = Arc::new(TelegramClient::new(bot.clone()));
 
             // Fetch owner info from Telegram
@@ -95,6 +95,9 @@ impl BotState {
                 data_dir: Some(config.data_dir.clone()),
                 gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
                 tts_endpoint: config.tts_endpoint.clone(),
+                personality: config.personality.clone(),
+                scan_interval_minutes: config.scan_interval_minutes,
+                peer_bots: config.peer_bots.clone(),
             };
 
             // Fetch available TTS voices if endpoint configured

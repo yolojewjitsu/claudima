@@ -9,6 +9,7 @@ pub mod engine;
 pub mod reminders;
 pub mod gemini;
 pub mod message;
+pub mod peer;
 pub mod telegram;
 pub mod tools;
 pub mod tts;

@@ -12,6 +12,7 @@ use crate::chatbot::context::ContextBuffer;
 use crate::chatbot::debounce::Debouncer;
 use crate::chatbot::gemini::GeminiClient;
 use crate::chatbot::message::{ChatMessage, ReplyTo};
+use crate::chatbot::peer;
 use crate::chatbot::tts::TtsClient;
 use crate::chatbot::database::Database;
 use crate::chatbot::reminders;
@@ -77,6 +78,12 @@ pub struct ChatbotConfig {
     pub data_dir: Option<PathBuf>,
     pub gemini_api_key: Option<String>,
     pub tts_endpoint: Option<String>,
+    /// Custom personality/identity override for the bot.
+    pub personality: Option<String>,
+    /// Interval in minutes for scheduled scans (0 = disabled).
+    pub scan_interval_minutes: u32,
+    /// Usernames of peer bots (without @) for inter-bot communication.
+    pub peer_bots: Vec<String>,
 }
 
 impl Default for ChatbotConfig {
@@ -92,6 +99,9 @@ impl Default for ChatbotConfig {
             data_dir: None,
             gemini_api_key: None,
             tts_endpoint: None,
+            personality: None,
+            scan_interval_minutes: 0,
+            peer_bots: vec![],
         }
     }
 }
@@ -217,6 +227,92 @@ impl ChatbotEngine {
                 });
             },
         );
+
+        // Spawn peer message checker background task
+        if !self.config.peer_bots.is_empty() {
+            let pending = self.pending.clone();
+            let data_dir = self.config.data_dir.clone();
+            let bot_username = self.config.bot_username.clone();
+            let peer_debouncer = debouncer.clone();
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    interval.tick().await;
+                    if let (Some(dir), Some(username)) = (&data_dir, &bot_username) {
+                        let messages = peer::receive_peer_messages(dir, username);
+                        if !messages.is_empty() {
+                            info!("📬 Received {} peer message(s)", messages.len());
+                            let mut pending_guard = pending.lock().await;
+                            for peer_msg in messages {
+                                // Convert peer message to ChatMessage
+                                let chat_msg = ChatMessage {
+                                    message_id: peer_msg.message_id,
+                                    chat_id: peer_msg.chat_id,
+                                    user_id: 0, // Bot messages don't have user_id
+                                    username: peer_msg.from_bot.clone(),
+                                    timestamp: peer_msg.timestamp,
+                                    text: peer_msg.text,
+                                    reply_to: peer_msg.reply_to_message_id.map(|id| ReplyTo {
+                                        message_id: id,
+                                        username: String::new(),
+                                        text: String::new(),
+                                    }),
+                                    image: None,
+                                    voice_transcription: None,
+                                    documents: vec![],
+                                };
+                                pending_guard.push(chat_msg);
+                            }
+                            drop(pending_guard);
+                            // Trigger debouncer to process the messages
+                            peer_debouncer.trigger().await;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Spawn proactive scan background task
+        if self.config.scan_interval_minutes > 0 {
+            let pending = self.pending.clone();
+            let scan_interval = self.config.scan_interval_minutes;
+            let scan_debouncer = debouncer.clone();
+            let primary_chat_id = self.config.primary_chat_id;
+
+            tokio::spawn(async move {
+                let interval_duration = Duration::from_secs(scan_interval as u64 * 60);
+                let mut interval = tokio::time::interval(interval_duration);
+                // Skip the first tick (don't scan immediately on startup)
+                interval.tick().await;
+
+                loop {
+                    interval.tick().await;
+                    info!("🔍 Proactive scan triggered (every {} min)", scan_interval);
+
+                    // Create a system message to trigger scanning
+                    let scan_msg = ChatMessage {
+                        message_id: 0,
+                        chat_id: primary_chat_id,
+                        user_id: 0,
+                        username: "system".to_string(),
+                        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(),
+                        text: "[SCAN] Proactive scan triggered. Use WebSearch to hunt for interesting signals, news, or developments relevant to your role. Share findings in the group.".to_string(),
+                        reply_to: None,
+                        image: None,
+                        voice_transcription: None,
+                        documents: vec![],
+                    };
+
+                    let mut pending_guard = pending.lock().await;
+                    pending_guard.push(scan_msg);
+                    drop(pending_guard);
+
+                    scan_debouncer.trigger().await;
+                }
+            });
+            info!("🔍 Proactive scan enabled (every {} min)", self.config.scan_interval_minutes);
+        }
 
         self.debouncer = Some(debouncer);
     }
@@ -451,13 +547,16 @@ async fn process_messages(
 
         consecutive_empty = 0;
 
-        // Check for done
-        let has_done = response.tool_calls.iter().any(|tc| matches!(tc.call, ToolCall::Done));
+        // Check for done or noop (both signal Claude has nothing more to do)
+        let has_done = response
+            .tool_calls
+            .iter()
+            .any(|tc| matches!(tc.call, ToolCall::Done | ToolCall::Noop));
 
         // Execute tools
         let mut results = Vec::new();
         for tc in &response.tool_calls {
-            if matches!(tc.call, ToolCall::Done) {
+            if matches!(tc.call, ToolCall::Done | ToolCall::Noop) {
                 results.push(ToolResult {
                     tool_use_id: tc.id.clone(),
                     content: None,
@@ -733,6 +832,31 @@ async fn execute_send_message(
 
     let msg_id = telegram.send_message(chat_id, text, validated_reply).await?;
     info!("✅ Sent message {} to chat {}", msg_id, chat_id);
+
+    // Check for peer bot mentions and send peer messages
+    if !config.peer_bots.is_empty() {
+        if let Some(ref data_dir) = config.data_dir {
+            let mentioned_peers = peer::find_mentioned_peers(text, &config.peer_bots);
+            if let Some(ref my_username) = config.bot_username {
+                for peer_username in mentioned_peers {
+                    let peer_msg = peer::PeerMessage {
+                        message_id: msg_id,
+                        chat_id,
+                        from_bot: my_username.clone(),
+                        to_bot: peer_username.clone(),
+                        text: text.to_string(),
+                        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                        reply_to_message_id: validated_reply,
+                    };
+                    if let Err(e) = peer::send_peer_message(data_dir, &peer_msg) {
+                        warn!("Failed to send peer message to @{}: {}", peer_username, e);
+                    } else {
+                        info!("📨 Sent peer message to @{}", peer_username);
+                    }
+                }
+            }
+        }
+    }
 
     // Build reply info
     let reply_to = if let Some(reply_id) = validated_reply {
@@ -1751,10 +1875,18 @@ pub fn system_prompt(config: &ChatbotConfig, available_voices: Option<&[String]>
         _ => String::new(),
     };
 
+    // Use custom personality or default Claudima description
+    let identity = match &config.personality {
+        Some(p) => p.clone(),
+        None => format!(
+            "You are Claudima, a Telegram bot. Your name is a mix of Claude (your AI foundation) \
+             and Dima (your creator). {}", username_info
+        ),
+    };
+
     format!(r#"# Who You Are
 
-You are Claudima, a Telegram bot. Your name is a mix of Claude (your AI foundation)
-and Dima (your creator). {username_info}
+{identity}
 
 **Started:** {restart_time} (this is when you were last restarted)
 
@@ -1899,6 +2031,10 @@ survives context resets. Use it for:
 4. If exists: edit_memory to add the new info
 
 **Security:** All paths are relative to memories/. No .. allowed.
+
+**When confused by owner instructions:** If the owner mentions something you don't recognize
+(like "the greeting setup" or "fred again link"), use `search_memories` first before asking
+for clarification. The answer is probably in your memory files.
 
 # Bug Reporting
 

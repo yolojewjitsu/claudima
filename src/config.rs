@@ -53,6 +53,9 @@ struct ConfigFile {
     /// Users who can DM the bot but don't have owner privileges
     #[serde(default)]
     trusted_dm_users: Vec<u64>,
+    /// Usernames of peer bots that can communicate with this bot (e.g., ["clauscout_bot", "clauoracle_bot"])
+    #[serde(default)]
+    peer_bots: Vec<String>,
     telegram_bot_token: String,
     /// OpenRouter API key for spam classification
     #[serde(default)]
@@ -62,6 +65,8 @@ struct ConfigFile {
     gemini_api_key: String,
     #[serde(default)]
     allowed_groups: Vec<i64>,
+    /// Primary chat ID for the bot (if not set, uses first allowed_group)
+    primary_chat_id: Option<i64>,
     #[serde(default)]
     trusted_channels: Vec<i64>,
     #[serde(default)]
@@ -79,6 +84,12 @@ struct ConfigFile {
     whisper_model_path: Option<String>,
     /// TTS endpoint for Kokoro-FastAPI (e.g., "http://localhost:8880").
     tts_endpoint: Option<String>,
+    /// Custom personality/identity override for the bot.
+    /// If set, replaces the default "You are Claudima" description.
+    personality: Option<String>,
+    /// Interval in minutes for scheduled scans (0 = disabled).
+    #[serde(default)]
+    scan_interval_minutes: u32,
 }
 
 fn default_max_strikes() -> u8 {
@@ -98,6 +109,8 @@ pub struct Config {
     pub openrouter_api_key: String,
     pub gemini_api_key: String,
     pub allowed_groups: HashSet<ChatId>,
+    /// Primary chat ID (first allowed_group or explicit override)
+    pub primary_chat_id: i64,
     pub trusted_channels: HashSet<ChatId>,
     pub spam_patterns: Vec<Regex>,
     pub safe_patterns: Vec<Regex>,
@@ -110,6 +123,12 @@ pub struct Config {
     pub whisper_model_path: Option<PathBuf>,
     /// TTS endpoint for Kokoro-FastAPI (e.g., "http://localhost:8880").
     pub tts_endpoint: Option<String>,
+    /// Custom personality/identity override for the bot.
+    pub personality: Option<String>,
+    /// Interval in minutes for scheduled scans (0 = disabled).
+    pub scan_interval_minutes: u32,
+    /// Usernames of peer bots (without @) that can communicate with this bot.
+    pub peer_bots: Vec<String>,
 }
 
 impl Config {
@@ -142,6 +161,9 @@ impl Config {
                 .map(|id| (id as i64, None))
                 .collect()
         ));
+        // Get primary_chat_id: explicit config value or first allowed_group
+        let primary_chat_id = file.primary_chat_id
+            .unwrap_or_else(|| file.allowed_groups.first().copied().unwrap_or(0));
         let allowed_groups = file.allowed_groups.into_iter().map(ChatId).collect();
         let trusted_channels = file.trusted_channels.into_iter().map(ChatId).collect();
 
@@ -176,6 +198,7 @@ impl Config {
             openrouter_api_key: file.openrouter_api_key,
             gemini_api_key: file.gemini_api_key,
             allowed_groups,
+            primary_chat_id,
             trusted_channels,
             spam_patterns,
             safe_patterns,
@@ -185,6 +208,9 @@ impl Config {
             data_dir,
             whisper_model_path: file.whisper_model_path.map(PathBuf::from),
             tts_endpoint: file.tts_endpoint,
+            personality: file.personality,
+            scan_interval_minutes: file.scan_interval_minutes,
+            peer_bots: file.peer_bots.into_iter().map(|s| s.trim_start_matches('@').to_lowercase()).collect(),
         })
     }
 
