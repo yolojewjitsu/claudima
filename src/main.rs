@@ -97,6 +97,8 @@ impl BotState {
                 tts_endpoint: config.tts_endpoint.clone(),
                 personality: config.personality.clone(),
                 scan_interval_minutes: config.scan_interval_minutes,
+                scan_times: config.scan_times.clone(),
+                scan_timezone: config.scan_timezone,
                 peer_bots: config.peer_bots.clone(),
             };
 
@@ -278,6 +280,7 @@ async fn main() {
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(handle_new_message))
         .branch(Update::filter_edited_message().endpoint(handle_edited_message))
+        .branch(Update::filter_channel_post().endpoint(handle_channel_post))
         .branch(Update::filter_chat_member().endpoint(handle_chat_member));
 
     Dispatcher::builder(bot, handler)
@@ -469,6 +472,63 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         let documents = extract_documents(&bot, &msg).await;
 
         let chat_msg = telegram_to_chat_message_with_media(&msg, image, voice_transcription, documents);
+        chatbot.handle_message(chat_msg).await;
+    }
+
+    Ok(())
+}
+
+async fn handle_channel_post(_bot: Bot, msg: Message, state: Arc<BotState>) -> ResponseResult<()> {
+    // Only handle posts in allowed channels/groups
+    if !state.config.allowed_groups.is_empty()
+        && !state.config.allowed_groups.contains(&msg.chat.id)
+    {
+        return Ok(());
+    }
+
+    let text = msg.text().or_else(|| msg.caption());
+    let has_image = msg.photo().is_some();
+
+    if text.is_none() && !has_image {
+        return Ok(());
+    }
+
+    // Channel posts have sender_chat instead of from
+    let channel_title = msg.sender_chat.as_ref()
+        .and_then(|c| c.title())
+        .unwrap_or("channel");
+
+    info!("📢 Channel post in {} ({}): {:?}",
+        channel_title, msg.chat.id,
+        text.map(|t| t.chars().take(100).collect::<String>()));
+
+    if let Some(ref chatbot) = state.chatbot {
+        let image = if has_image {
+            if let Some(photos) = msg.photo() {
+                if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
+                    chatbot.download_image(&largest.file.id.0).await.ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let chat_msg = ChatMessage {
+            message_id: msg.id.0 as i64,
+            chat_id: msg.chat.id.0,
+            user_id: 0,
+            username: channel_title.to_string(),
+            timestamp: msg.date.format("%Y-%m-%d %H:%M").to_string(),
+            text: text.unwrap_or("").to_string(),
+            reply_to: None,
+            image,
+            voice_transcription: None,
+            documents: vec![],
+        };
         chatbot.handle_message(chat_msg).await;
     }
 

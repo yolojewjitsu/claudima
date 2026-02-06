@@ -10,6 +10,7 @@ pub mod reminders;
 pub mod gemini;
 pub mod message;
 pub mod peer;
+pub mod signals;
 pub mod telegram;
 pub mod tools;
 pub mod tts;

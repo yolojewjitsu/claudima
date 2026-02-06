@@ -216,6 +216,38 @@ pub enum ToolCall {
         reminder_id: i64,
     },
 
+    // === Signal Tracking Tools ===
+
+    /// Add a new signal to track.
+    AddSignal {
+        /// Short title for the signal/opportunity
+        title: String,
+        /// Detailed notes about the signal
+        notes: String,
+        /// Tags/categories (e.g. ["ai", "saas", "crypto"])
+        #[serde(default)]
+        tags: Vec<String>,
+    },
+
+    /// Update a tracked signal.
+    UpdateSignal {
+        /// Signal ID to update
+        id: String,
+        /// New status (detected, researching, validated, actionable, building, shipped, dropped)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Updated notes (replaces existing)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+    },
+
+    /// List all tracked signals.
+    ListSignals {
+        /// Filter by status (optional)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+
     // === Admin Tools (owner only, DM only) ===
 
     /// Add a user to the trusted DM users list. Owner only, must be used in DM.
@@ -579,6 +611,55 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["reminder_id"]
             }),
         },
+        // === Signal Tracking Tools ===
+        Tool {
+            name: "add_signal".to_string(),
+            description: "Add a new signal/opportunity to track. Use this when you discover something worth investigating.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short title for the signal (e.g. 'AI code review tools')" },
+                    "notes": { "type": "string", "description": "Detailed notes: what you found, why it's interesting, competitors, etc." },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Tags/categories (e.g. ['ai', 'saas', 'developer_tools'])"
+                    }
+                },
+                "required": ["title", "notes"]
+            }),
+        },
+        Tool {
+            name: "update_signal".to_string(),
+            description: "Update a tracked signal's status or notes. Use to progress signals through stages.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Signal ID (e.g. 'sig_1234567890')" },
+                    "status": {
+                        "type": "string",
+                        "description": "New status: detected, researching, validated, actionable, building, shipped, dropped",
+                        "enum": ["detected", "researching", "validated", "actionable", "building", "shipped", "dropped"]
+                    },
+                    "notes": { "type": "string", "description": "Updated notes (replaces existing)" }
+                },
+                "required": ["id"]
+            }),
+        },
+        Tool {
+            name: "list_signals".to_string(),
+            description: "List all tracked signals with their status and notes.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status (optional)",
+                        "enum": ["detected", "researching", "validated", "actionable", "building", "shipped", "dropped"]
+                    }
+                }
+            }),
+        },
         // === Admin Tools (owner only, DM only) ===
         Tool {
             name: "add_trusted_user".to_string(),
@@ -652,7 +733,7 @@ mod tests {
     #[test]
     fn test_get_tool_definitions() {
         let tools = get_tool_definitions();
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 31);
         assert_eq!(tools[0].name, "send_message");
         assert_eq!(tools[1].name, "get_user_info");
         assert_eq!(tools[2].name, "query");
@@ -678,8 +759,13 @@ mod tests {
         assert_eq!(tools[22].name, "set_reminder");
         assert_eq!(tools[23].name, "list_reminders");
         assert_eq!(tools[24].name, "cancel_reminder");
-        assert_eq!(tools[25].name, "add_trusted_user");
-        assert_eq!(tools[26].name, "remove_trusted_user");
-        assert_eq!(tools[27].name, "done");
+        // Signal tracking tools
+        assert_eq!(tools[25].name, "add_signal");
+        assert_eq!(tools[26].name, "update_signal");
+        assert_eq!(tools[27].name, "list_signals");
+        // Admin tools
+        assert_eq!(tools[28].name, "add_trusted_user");
+        assert_eq!(tools[29].name, "remove_trusted_user");
+        assert_eq!(tools[30].name, "done");
     }
 }

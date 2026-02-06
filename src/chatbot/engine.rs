@@ -82,6 +82,10 @@ pub struct ChatbotConfig {
     pub personality: Option<String>,
     /// Interval in minutes for scheduled scans (0 = disabled).
     pub scan_interval_minutes: u32,
+    /// Specific times of day to run scans (e.g., 10:00, 20:00).
+    pub scan_times: Vec<chrono::NaiveTime>,
+    /// IANA timezone for scan_times.
+    pub scan_timezone: chrono_tz::Tz,
     /// Usernames of peer bots (without @) for inter-bot communication.
     pub peer_bots: Vec<String>,
 }
@@ -101,6 +105,8 @@ impl Default for ChatbotConfig {
             tts_endpoint: None,
             personality: None,
             scan_interval_minutes: 0,
+            scan_times: vec![],
+            scan_timezone: chrono_tz::UTC,
             peer_bots: vec![],
         }
     }
@@ -274,11 +280,35 @@ impl ChatbotEngine {
         }
 
         // Spawn proactive scan background task
-        if self.config.scan_interval_minutes > 0 {
+        // Priority: scan_times (specific times of day) > scan_interval_minutes (fixed interval)
+        if !self.config.scan_times.is_empty() {
+            let pending = self.pending.clone();
+            let scan_debouncer = debouncer.clone();
+            let primary_chat_id = self.config.primary_chat_id;
+            let scan_data_dir = self.config.data_dir.clone();
+            let scan_times = self.config.scan_times.clone();
+            let scan_tz = self.config.scan_timezone;
+
+            tokio::spawn(async move {
+                loop {
+                    let sleep_dur = next_scan_delay(&scan_times, scan_tz);
+                    info!("🔍 Next scan in {:.0} min", sleep_dur.as_secs_f64() / 60.0);
+                    tokio::time::sleep(sleep_dur).await;
+
+                    info!("🔍 Scheduled scan triggered");
+                    fire_scan(&pending, &scan_debouncer, primary_chat_id, &scan_data_dir).await;
+                }
+            });
+            let times_str: Vec<String> = self.config.scan_times.iter()
+                .map(|t| t.format("%H:%M").to_string())
+                .collect();
+            info!("🔍 Scheduled scans at {} ({})", times_str.join(", "), self.config.scan_timezone);
+        } else if self.config.scan_interval_minutes > 0 {
             let pending = self.pending.clone();
             let scan_interval = self.config.scan_interval_minutes;
             let scan_debouncer = debouncer.clone();
             let primary_chat_id = self.config.primary_chat_id;
+            let scan_data_dir = self.config.data_dir.clone();
 
             tokio::spawn(async move {
                 let interval_duration = Duration::from_secs(scan_interval as u64 * 60);
@@ -289,26 +319,7 @@ impl ChatbotEngine {
                 loop {
                     interval.tick().await;
                     info!("🔍 Proactive scan triggered (every {} min)", scan_interval);
-
-                    // Create a system message to trigger scanning
-                    let scan_msg = ChatMessage {
-                        message_id: 0,
-                        chat_id: primary_chat_id,
-                        user_id: 0,
-                        username: "system".to_string(),
-                        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(),
-                        text: "[SCAN] Proactive scan triggered. Use WebSearch to hunt for interesting signals, news, or developments relevant to your role. Share findings in the group.".to_string(),
-                        reply_to: None,
-                        image: None,
-                        voice_transcription: None,
-                        documents: vec![],
-                    };
-
-                    let mut pending_guard = pending.lock().await;
-                    pending_guard.push(scan_msg);
-                    drop(pending_guard);
-
-                    scan_debouncer.trigger().await;
+                    fire_scan(&pending, &scan_debouncer, primary_chat_id, &scan_data_dir).await;
                 }
             });
             info!("🔍 Proactive scan enabled (every {} min)", self.config.scan_interval_minutes);
@@ -780,6 +791,16 @@ async fn execute_tool(
         ToolCall::RemoveTrustedUser { user_id, username } => {
             execute_remove_trusted_user(ctx.config, ctx.database, *user_id, username.as_deref(), ctx.requesting_user_id, ctx.requesting_chat_id).await
         }
+        // Signal tracking tools
+        ToolCall::AddSignal { title, notes, tags } => {
+            execute_add_signal(ctx.config.data_dir.as_ref(), title, notes, tags).await
+        }
+        ToolCall::UpdateSignal { id, status, notes } => {
+            execute_update_signal(ctx.config.data_dir.as_ref(), id, status.as_deref(), notes.as_deref()).await
+        }
+        ToolCall::ListSignals { status } => {
+            execute_list_signals(ctx.config.data_dir.as_ref(), status.as_deref()).await
+        }
         ToolCall::Noop => Ok(None),
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
@@ -834,25 +855,25 @@ async fn execute_send_message(
     info!("✅ Sent message {} to chat {}", msg_id, chat_id);
 
     // Check for peer bot mentions and send peer messages
-    if !config.peer_bots.is_empty() {
-        if let Some(ref data_dir) = config.data_dir {
-            let mentioned_peers = peer::find_mentioned_peers(text, &config.peer_bots);
-            if let Some(ref my_username) = config.bot_username {
-                for peer_username in mentioned_peers {
-                    let peer_msg = peer::PeerMessage {
-                        message_id: msg_id,
-                        chat_id,
-                        from_bot: my_username.clone(),
-                        to_bot: peer_username.clone(),
-                        text: text.to_string(),
-                        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                        reply_to_message_id: validated_reply,
-                    };
-                    if let Err(e) = peer::send_peer_message(data_dir, &peer_msg) {
-                        warn!("Failed to send peer message to @{}: {}", peer_username, e);
-                    } else {
-                        info!("📨 Sent peer message to @{}", peer_username);
-                    }
+    if !config.peer_bots.is_empty()
+        && let Some(ref data_dir) = config.data_dir
+    {
+        let mentioned_peers = peer::find_mentioned_peers(text, &config.peer_bots);
+        if let Some(ref my_username) = config.bot_username {
+            for peer_username in mentioned_peers {
+                let peer_msg = peer::PeerMessage {
+                    message_id: msg_id,
+                    chat_id,
+                    from_bot: my_username.clone(),
+                    to_bot: peer_username.clone(),
+                    text: text.to_string(),
+                    timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    reply_to_message_id: validated_reply,
+                };
+                if let Err(e) = peer::send_peer_message(data_dir, &peer_msg) {
+                    warn!("Failed to send peer message to @{}: {}", peer_username, e);
+                } else {
+                    info!("📨 Sent peer message to @{}", peer_username);
                 }
             }
         }
@@ -1450,6 +1471,105 @@ async fn execute_report_bug(
         .map_err(|e| format!("Failed to write feedback: {e}"))?;
 
     Ok(None) // Action tool - developer will see it via the poller
+}
+
+// === Signal Tracking Tool Implementations ===
+
+async fn execute_add_signal(
+    data_dir: Option<&PathBuf>,
+    title: &str,
+    notes: &str,
+    tags: &[String],
+) -> Result<Option<String>, String> {
+    let data_dir = data_dir.ok_or("No data_dir configured")?;
+
+    let mut store = super::signals::SignalsStore::load(data_dir);
+    let id = store.add_signal(title.to_string(), notes.to_string(), tags.to_vec());
+    store.save(data_dir).map_err(|e| format!("Failed to save signals: {e}"))?;
+
+    Ok(Some(format!("Added signal: {} ({})", title, id)))
+}
+
+async fn execute_update_signal(
+    data_dir: Option<&PathBuf>,
+    id: &str,
+    status: Option<&str>,
+    notes: Option<&str>,
+) -> Result<Option<String>, String> {
+    let data_dir = data_dir.ok_or("No data_dir configured")?;
+
+    let mut store = super::signals::SignalsStore::load(data_dir);
+
+    // Update status if provided
+    if let Some(status_str) = status {
+        let signal_status = match status_str.to_lowercase().as_str() {
+            "detected" => super::signals::SignalStatus::Detected,
+            "researching" => super::signals::SignalStatus::Researching,
+            "validated" => super::signals::SignalStatus::Validated,
+            "actionable" => super::signals::SignalStatus::Actionable,
+            "building" => super::signals::SignalStatus::Building,
+            "shipped" => super::signals::SignalStatus::Shipped,
+            "dropped" => super::signals::SignalStatus::Dropped,
+            _ => return Err(format!("Invalid status: {}. Use: detected, researching, validated, actionable, building, shipped, dropped", status_str)),
+        };
+        if !store.update_status(id, signal_status) {
+            return Err(format!("Signal not found: {}", id));
+        }
+    }
+
+    // Update notes if provided
+    if let Some(notes_str) = notes
+        && !store.update_notes(id, notes_str.to_string())
+    {
+        return Err(format!("Signal not found: {}", id));
+    }
+
+    store.save(data_dir).map_err(|e| format!("Failed to save signals: {e}"))?;
+
+    Ok(Some(format!("Updated signal: {}", id)))
+}
+
+async fn execute_list_signals(
+    data_dir: Option<&PathBuf>,
+    status_filter: Option<&str>,
+) -> Result<Option<String>, String> {
+    let data_dir = data_dir.ok_or("No data_dir configured")?;
+
+    let store = super::signals::SignalsStore::load(data_dir);
+
+    let signals: Vec<_> = if let Some(status_str) = status_filter {
+        let status = match status_str.to_lowercase().as_str() {
+            "detected" => super::signals::SignalStatus::Detected,
+            "researching" => super::signals::SignalStatus::Researching,
+            "validated" => super::signals::SignalStatus::Validated,
+            "actionable" => super::signals::SignalStatus::Actionable,
+            "building" => super::signals::SignalStatus::Building,
+            "shipped" => super::signals::SignalStatus::Shipped,
+            "dropped" => super::signals::SignalStatus::Dropped,
+            _ => return Err(format!("Invalid status filter: {}", status_str)),
+        };
+        store.by_status(status)
+    } else {
+        store.active()
+    };
+
+    if signals.is_empty() {
+        return Ok(Some("No signals found".to_string()));
+    }
+
+    let result: Vec<serde_json::Value> = signals.iter().map(|s| {
+        serde_json::json!({
+            "id": s.id,
+            "title": s.title,
+            "status": s.status.to_string(),
+            "notes": s.notes,
+            "tags": s.tags,
+            "detected_at": s.detected_at,
+            "updated_at": s.updated_at,
+        })
+    }).collect();
+
+    Ok(Some(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "[]".to_string())))
 }
 
 // === Reminder Tool Implementations ===
@@ -2151,6 +2271,77 @@ ALWAYS include {{"tool": "done"}} as the LAST item.
 Telegram HTML only: b, strong, i, em, u, s, code, pre, a.
 NEVER use <cite> tags - strip them from any web search results.
 "#)
+}
+
+/// Compute duration until the next scheduled scan time.
+fn next_scan_delay(times: &[chrono::NaiveTime], tz: chrono_tz::Tz) -> Duration {
+    let now_utc = chrono::Utc::now();
+    let now_local = now_utc.with_timezone(&tz);
+    let today = now_local.date_naive();
+    let tomorrow = today + chrono::Duration::days(1);
+
+    let mut earliest: Option<chrono::DateTime<chrono::Utc>> = None;
+
+    for &time in times {
+        // Try today first
+        if let Some(dt) = today.and_time(time).and_local_timezone(tz).earliest() {
+            let dt_utc = dt.with_timezone(&chrono::Utc);
+            if dt_utc > now_utc {
+                if earliest.is_none() || dt_utc < earliest.unwrap() {
+                    earliest = Some(dt_utc);
+                }
+                continue;
+            }
+        }
+        // Already passed today, try tomorrow
+        if let Some(dt) = tomorrow.and_time(time).and_local_timezone(tz).earliest() {
+            let dt_utc = dt.with_timezone(&chrono::Utc);
+            if earliest.is_none() || dt_utc < earliest.unwrap() {
+                earliest = Some(dt_utc);
+            }
+        }
+    }
+
+    match earliest {
+        Some(next) => {
+            let delta = next - now_utc;
+            Duration::from_secs(delta.num_seconds().max(1) as u64)
+        }
+        None => Duration::from_secs(3600), // Fallback: 1 hour
+    }
+}
+
+/// Push a scan message into the pending queue and trigger the debouncer.
+async fn fire_scan(
+    pending: &Mutex<Vec<ChatMessage>>,
+    debouncer: &Debouncer,
+    primary_chat_id: i64,
+    data_dir: &Option<PathBuf>,
+) {
+    let scan_text = if let Some(data_dir) = data_dir {
+        super::signals::generate_scan_message(data_dir)
+    } else {
+        "[SCAN] Scheduled scan. Perform WebSearch and share findings.".to_string()
+    };
+
+    let scan_msg = ChatMessage {
+        message_id: 0,
+        chat_id: primary_chat_id,
+        user_id: 0,
+        username: "system".to_string(),
+        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(),
+        text: scan_text,
+        reply_to: None,
+        image: None,
+        voice_transcription: None,
+        documents: vec![],
+    };
+
+    let mut pending_guard = pending.lock().await;
+    pending_guard.push(scan_msg);
+    drop(pending_guard);
+
+    debouncer.trigger().await;
 }
 
 #[cfg(test)]

@@ -61,6 +61,12 @@ mod tests {
             data_dir: std::path::PathBuf::from("."),
             whisper_model_path: None,
             tts_endpoint: None,
+            personality: None,
+            scan_interval_minutes: 0,
+            scan_times: vec![],
+            scan_timezone: chrono_tz::UTC,
+            peer_bots: vec![],
+            primary_chat_id: 0,
         }
     }
 

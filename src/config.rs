@@ -90,6 +90,13 @@ struct ConfigFile {
     /// Interval in minutes for scheduled scans (0 = disabled).
     #[serde(default)]
     scan_interval_minutes: u32,
+    /// Specific times of day to run scans (e.g., ["10:00", "20:00"]).
+    /// Takes priority over scan_interval_minutes when non-empty.
+    #[serde(default)]
+    scan_times: Vec<String>,
+    /// IANA timezone for scan_times (e.g., "Europe/Paris"). Defaults to "UTC".
+    #[serde(default)]
+    scan_timezone: Option<String>,
 }
 
 fn default_max_strikes() -> u8 {
@@ -127,6 +134,10 @@ pub struct Config {
     pub personality: Option<String>,
     /// Interval in minutes for scheduled scans (0 = disabled).
     pub scan_interval_minutes: u32,
+    /// Specific times of day to run scans (e.g., ["10:00", "20:00"]).
+    pub scan_times: Vec<chrono::NaiveTime>,
+    /// IANA timezone for scan_times (e.g., "Europe/Paris").
+    pub scan_timezone: chrono_tz::Tz,
     /// Usernames of peer bots (without @) that can communicate with this bot.
     pub peer_bots: Vec<String>,
 }
@@ -190,6 +201,20 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
 
+        // Parse scan times (HH:MM format)
+        let scan_times = file.scan_times
+            .into_iter()
+            .map(|t| chrono::NaiveTime::parse_from_str(&t, "%H:%M")
+                .map_err(|_| ConfigError::Validation(format!("invalid scan_time '{}' (expected HH:MM)", t))))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Parse timezone
+        let scan_timezone: chrono_tz::Tz = match file.scan_timezone {
+            Some(tz) => tz.parse()
+                .map_err(|_| ConfigError::Validation(format!("invalid scan_timezone '{}' (expected IANA timezone like 'Europe/Paris')", tz)))?,
+            None => chrono_tz::UTC,
+        };
+
         Ok(Self {
             owner_ids,
             trusted_dm_users,
@@ -210,6 +235,8 @@ impl Config {
             tts_endpoint: file.tts_endpoint,
             personality: file.personality,
             scan_interval_minutes: file.scan_interval_minutes,
+            scan_times,
+            scan_timezone,
             peer_bots: file.peer_bots.into_iter().map(|s| s.trim_start_matches('@').to_lowercase()).collect(),
         })
     }
